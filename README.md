@@ -3,9 +3,10 @@
 Asynchronous persistent data structures in Node.js, modeled after HTML5
 localStorage
 
-*@heisenware/storage* doesn't use a database. Instead, JSON documents are stored
-in the file system for persistence. Because there is no network overhead,
-*@heisenware/storage* is just about as fast as a database can get.
+_@heisenware/storage_ doesn't use a database. Instead, JSON documents are stored
+in the file system for persistence. Because there is no network and relational
+query overhead, _@heisenware/storage_ is just about as fast as a database can
+get.
 
 ## Install
 
