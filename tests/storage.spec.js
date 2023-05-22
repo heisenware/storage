@@ -17,8 +17,9 @@ describe('storage', () => {
       storage = new Storage({ dir })
       assert.equal(fs.accessSync(dir), undefined)
     })
-    it('should report no have no keys', () => {
-      assert.deepEqual(storage.keys(), [])
+    it('should report to have no keys', async () => {
+      const keys = await storage.keys()
+      assert.deepEqual(keys, [])
     })
     context('read / write items', () => {
       it('should not read a non-existing item', async () => {
@@ -70,7 +71,8 @@ describe('storage', () => {
       })
       it('should clear the entire storage', async () => {
         await storage.clear()
-        assert.deepEqual(storage.keys(), [])
+        const keys = await storage.keys()
+        assert.deepEqual(keys, [])
       })
     })
   })
@@ -117,7 +119,8 @@ describe('storage', () => {
       })
       it('should clear the entire storage', async () => {
         await storage1.clear()
-        assert.deepEqual(storage2.keys(), [])
+        const keys = await storage2.keys()
+        assert.deepEqual(keys, [])
       })
     }
   )
@@ -125,12 +128,13 @@ describe('storage', () => {
   context('construction on non-empty store', () => {
     let storage
     it('should not overwrite information when already existing', () => {
-      const dir = path.join(__dirname, 'fixtures')
+      const dir = path.join(__dirname, 'fixtures/existing-storage')
       assert.equal(fs.accessSync(dir), undefined)
       storage = new Storage({ dir })
     })
-    it('should report to have three keys', () => {
-      assert.deepEqual(storage.keys(), ['broken', 'test-001', 'test-002.json'])
+    it('should report to have two keys', async () => {
+      const keys = await storage.keys()
+      assert.deepEqual(keys, ['test-002', 'test-001'])
     })
     it('should not fail on broken items', async () => {
       const item = await storage.getItem('broken')
