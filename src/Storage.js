@@ -1,227 +1,246 @@
-const {
-  mkdirSync,
-  renameSync,
-  unlinkSync,
-  lstatSync,
-  readdirSync
-} = require('fs')
-const { writeFile, readFile, unlink, cp } = require('fs/promises')
-const { emptyDir } = require('fs-extra')
+const fs = require('fs/promises')
 const path = require('path')
-const queue = require('queue')
 const crypto = require('crypto')
+const { emptyDir } = require('fs-extra')
+const queue = require('queue')
+const fsSync = require('fs')
+const chokidar = require('chokidar')
 
-const TMP_MARKER = 'T'
+const TMP_MARKER = '.tmp'
 
 class Storage {
-  static queues = {}
-  static files = {}
+  static _instances = new Set()
 
-  /**
-   * Constructs a storage instance for a given directory
-   *
-   * @param {Object} options
-   * @param {String} options.dir absolute path to the directory that should be used for storing JSON files
-   * @param {Object} [log=console] any custom logging instance
-   */
   constructor ({ dir, log = console }) {
     this._dir = dir
     this._log = log
-    mkdirSync(dir, { recursive: true })
-    Storage.files[dir] = Storage._getDirectoryInfo(dir)[1]
+    this._queues = new Map()
+    this._files = new Map()
+    this._keyMap = new Map()
+    this._modifiedByUs = new Set()
+    Storage._instances.add(this)
+
+    try {
+      fsSync.mkdirSync(this._dir, { recursive: true })
+      this._scanDirectorySync(this._dir)
+      this._startWatching()
+    } catch (err) {
+      this._log.error(`Failed initializing storage directory: ${err.message}`)
+      throw err
+    }
   }
 
-  /**
-   * Provides the keys of all items currently available
-   *
-   * @returns Array of all stored item names
-   */
-  async keys () {
-    const keys = await Promise.all(
-      Object.values(Storage.files[this._dir]).map(
-        filePath =>
-          new Promise(async resolve => {
-            try {
-              const item = await this._readFile(filePath)
-              if (item?.key) resolve(item.key)
-              resolve(null)
-            } catch (err) {
-              resolve(null)
-            }
-          })
-      )
-    )
-    return keys.filter(x => x !== null)
+  async keys (folder = '') {
+    const scopedPath = path.join(this._dir, folder)
+    return Array.from(this._keyMap.entries())
+      .filter(([_, filePath]) => filePath.startsWith(scopedPath))
+      .map(([key]) => key)
   }
 
-  info () {
-    return Storage._getDirectoryInfo(this._dir)[0]
-  }
-
-  /**
-   * Asynchronously stores a new item (key-value pair)
-   *
-   * @param {String} key The key of the item
-   * @param {any} value A JSON stringify- and parsable value to store
-   * @param {Object} options
-   * @param {String} [folder=''] Optional folder for saving the item
-   */
   async setItem (key, value, { folder = '' } = {}) {
     const md5Key = Storage._md5(key)
     const dirPath = path.join(this._dir, folder)
-    if (folder !== '') {
-      mkdirSync(dirPath, { recursive: true })
-    }
+    await fs.mkdir(dirPath, { recursive: true })
     const filePath = path.join(dirPath, md5Key)
-    await this._writeFile(filePath, { key, value })
-    Storage.files[this._dir][md5Key] = filePath
+    const content = { key, value }
+    this._modifiedByUs.add(filePath)
+    await this._writeFile(filePath, content)
+    this._registerUpdateLocally(key, filePath)
   }
 
-  /**
-   * Asynchronously retrieves an item from the storage
-   *
-   * @param {String} key The key of the item
-   * @returns the value of the requested item
-   */
   async getItem (key) {
-    const md5Key = Storage._md5(key)
-    const filePath = Storage.files[this._dir][md5Key]
+    const filePath = this._keyMap.get(key)
     if (!filePath) {
       this._log.warn(`Could not find item with key: ${key}`)
       return null
     }
     const item = await this._readFile(filePath)
-    return item?.value ? item.value : null
+    return item?.value ?? null
   }
 
-  /**
-   * Asynchronously removes an item from the storage
-   *
-   * @param {String} key The key of the item
-   */
   async removeItem (key) {
-    const md5Key = Storage._md5(key)
-    const filePath = Storage.files[this._dir][md5Key]
+    const filePath = this._keyMap.get(key)
     if (!filePath) {
       this._log.warn(`Could not find item to remove with key: ${key}`)
       return
     }
+    this._modifiedByUs.add(filePath)
     await this._deleteFile(filePath)
-    delete Storage.files[this._dir][md5Key]
+    this._registerRemovalLocally(key, filePath)
   }
 
-  /**
-   * Clears the entire storage
-   */
   async clear ({ folder = '' } = {}) {
     const dir = path.join(this._dir, folder)
-    await emptyDir(dir, { recursive: true, force: true })
-    Storage.files[dir] = Storage._getDirectoryInfo(this._dir)[1]
+    await emptyDir(dir)
+
+    for (const instance of Storage._instances) {
+      for (const [key, filePath] of instance._keyMap.entries()) {
+        if (filePath.startsWith(dir)) {
+          instance._keyMap.delete(key)
+          instance._files.delete(Storage._md5(key))
+        }
+      }
+    }
   }
 
   async copy (destinationDir, { folder = '' } = {}) {
     const dir = path.join(this._dir, folder)
-    return cp(dir, destinationDir, { recursive: true, force: true })
+    return fs.cp(dir, destinationDir, { recursive: true })
   }
 
-  // private:
+  async cleanTemp () {
+    const walk = async dir => {
+      const entries = await fs.readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name)
+        if (entry.isDirectory()) await walk(fullPath)
+        else if (entry.name.includes(TMP_MARKER)) await fs.unlink(fullPath)
+      }
+    }
+    await walk(this._dir)
+  }
+
+  // Private
 
   static _md5 (key) {
     return crypto.createHash('md5').update(key).digest('hex')
   }
 
-  static _getDirectoryInfo (filename, files = {}) {
-    const stats = lstatSync(filename)
-    const tree = {
-      id: `${stats.ino}`,
-      path: filename,
-      name: path.basename(filename),
-      modDate: stats.mtime,
-      size: stats.size
+  _registerUpdateLocally (key, filePath) {
+    for (const instance of Storage._instances) {
+      instance._keyMap.set(key, filePath)
+      instance._files.set(Storage._md5(key), filePath)
     }
-    if (stats.isDirectory()) {
-      tree.isDir = true
-      const children = readdirSync(filename)
-      tree.childrenCount = children.length
-      tree.children = children.map(
-        child => Storage._getDirectoryInfo(filename + '/' + child, files)[0]
-      )
-    } else {
-      tree.isDir = false
-      tree.isFile = stats.isFile()
-      tree.isSymlink = stats.isSymbolicLink()
-      if (!tree.name.includes(TMP_MARKER)) {
-        files[tree.name] = filename
-      } else {
-        // TODO think about delete those folks...
-      }
-    }
-    return [tree, files]
   }
 
-  async _writeFile (path, content) {
-    const job = async () => {
-      try {
-        const pathTmp = `${path}${TMP_MARKER}${(Math.random() + 1)
-          .toString(36)
-          .substring(7)}`
-        await writeFile(pathTmp, JSON.stringify(content), { encoding: 'utf-8' })
-        renameSync(pathTmp, path)
-      } catch (err) {
-        this._log.error(`Failed writing file ${path}, because: ${err.message}`)
-        unlinkSync(pathTmp)
-      }
+  _registerRemovalLocally (key, filePath) {
+    for (const instance of Storage._instances) {
+      instance._keyMap.delete(key)
+      instance._files.delete(Storage._md5(key))
     }
-    return Storage._runQueue(path, job)
   }
 
-  async _readFile (path) {
-    const job = async () => {
-      try {
-        const buffer = await readFile(path, { encoding: 'utf-8' })
-        return JSON.parse(buffer)
-      } catch (err) {
-        this._log.error(`Failed reading file ${path}, because: ${err.message}`)
-        return null
+  _scanDirectorySync (dir) {
+    const entries = fsSync.readdirSync(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        this._scanDirectorySync(fullPath)
+      } else if (!entry.name.includes(TMP_MARKER)) {
+        try {
+          const content = fsSync.readFileSync(fullPath, 'utf-8')
+          const json = JSON.parse(content)
+          if (json?.key) {
+            this._keyMap.set(json.key, fullPath)
+            this._files.set(Storage._md5(json.key), fullPath)
+          }
+        } catch (err) {
+          this._log.warn(`Could not parse ${fullPath}: ${err.message}`)
+        }
       }
     }
-    return Storage._runQueue(path, job)
   }
 
-  async _deleteFile (path) {
-    const job = async () => {
-      try {
-        return unlink(path)
-      } catch (err) {
-        this._log.error(`Failed deleting file ${path}, because: ${err.message}`)
-      }
-    }
-    return Storage._runQueue(path, job)
-  }
-
-  static async _runQueue (id, job) {
-    let q
-    if (Storage.queues[id]) {
-      // this._log.info(`Encountered concurrency on path: ${id}`)
-      q = Storage.queues[id]
-    } else {
-      q = queue({ concurrency: 1, autostart: true })
-      q.on('end', () => {
-        q.removeAllListeners()
-        delete Storage.queues[id]
-      })
-      Storage.queues[id] = q
-    }
-    const ret = new Promise((resolve, reject) => {
-      q.on('success', (result, jobDone) => {
-        if (job === jobDone) resolve(result)
-      })
-      q.on('error', (error, jobDone) => {
-        if (job === jobDone) reject(error, jobDone)
-      })
+  _startWatching () {
+    const watcher = chokidar.watch(this._dir, {
+      persistent: true,
+      ignoreInitial: true,
+      depth: Infinity
     })
-    q.push(job)
-    return ret
+
+    watcher.on('add', filePath => this._handleFileChange(filePath))
+    watcher.on('change', filePath => this._handleFileChange(filePath))
+    watcher.on('unlink', filePath => this._handleFileRemoval(filePath))
+  }
+
+  async _handleFileChange (filePath) {
+    if (this._modifiedByUs.has(filePath)) {
+      this._modifiedByUs.delete(filePath)
+      return
+    }
+    if (filePath.includes(TMP_MARKER)) return
+    try {
+      const content = await fs.readFile(filePath, 'utf-8')
+      const json = JSON.parse(content)
+      if (json?.key) {
+        this._registerUpdateLocally(json.key, filePath)
+      }
+    } catch (err) {
+      this._log.warn(`Watcher failed to process ${filePath}: ${err.message}`)
+    }
+  }
+
+  _handleFileRemoval (filePath) {
+    if (this._modifiedByUs.has(filePath)) {
+      this._modifiedByUs.delete(filePath)
+    }
+    for (const [key, path] of this._keyMap.entries()) {
+      if (path === filePath) {
+        this._registerRemovalLocally(key, filePath)
+        break
+      }
+    }
+  }
+
+  async _writeFile (filePath, content) {
+    const q = this._getQueue(filePath)
+    return new Promise((resolve, reject) => {
+      const job = async () => {
+        const tmpPath = `${filePath}${TMP_MARKER}-${Date.now()}`
+        try {
+          await fs.writeFile(tmpPath, JSON.stringify(content), 'utf-8')
+          await fs.rename(tmpPath, filePath)
+          resolve()
+        } catch (err) {
+          this._log.error(`Failed writing ${filePath}: ${err.message}`)
+          try {
+            await fs.unlink(tmpPath)
+          } catch {}
+          reject(err)
+        }
+      }
+      q.push(job)
+    })
+  }
+
+  async _readFile (filePath) {
+    const q = this._getQueue(filePath)
+    return new Promise((resolve, reject) => {
+      const job = async () => {
+        try {
+          const content = await fs.readFile(filePath, 'utf-8')
+          resolve(JSON.parse(content))
+        } catch (err) {
+          this._log.error(`Failed reading ${filePath}: ${err.message}`)
+          resolve(null)
+        }
+      }
+      q.push(job)
+    })
+  }
+
+  async _deleteFile (filePath) {
+    const q = this._getQueue(filePath)
+    return new Promise((resolve, reject) => {
+      const job = async () => {
+        try {
+          await fs.unlink(filePath)
+          resolve()
+        } catch (err) {
+          this._log.error(`Failed deleting ${filePath}: ${err.message}`)
+          resolve()
+        }
+      }
+      q.push(job)
+    })
+  }
+
+  _getQueue (id) {
+    if (!this._queues.has(id)) {
+      const q = queue({ concurrency: 1, autostart: true })
+      this._queues.set(id, q)
+    }
+    return this._queues.get(id)
   }
 }
 
