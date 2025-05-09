@@ -11,6 +11,13 @@ const TMP_MARKER = '.tmp'
 class Storage {
   static _instances = new Set()
 
+  /**
+   * Constructs a storage instance for a given directory
+   *
+   * @param {Object} options
+   * @param {String} options.dir absolute path to the directory that should be used for storing JSON files
+   * @param {Object} [log=console] any custom logging instance
+   */
   constructor ({ dir, log = console }) {
     this._dir = dir
     this._log = log
@@ -30,13 +37,27 @@ class Storage {
     }
   }
 
-  async keys (folder = '') {
+  /**
+   * Provides the keys of all items currently available
+   *
+   * @param {String} [folder=''] If provided only keys stored within this folder are provided
+   * @returns Array of all stored item names
+   */
+  keys (folder = '') {
     const scopedPath = path.join(this._dir, folder)
     return Array.from(this._keyMap.entries())
       .filter(([_, filePath]) => filePath.startsWith(scopedPath))
       .map(([key]) => key)
   }
 
+  /**
+   * Asynchronously stores a new item (key-value pair)
+   *
+   * @param {String} key The key of the item
+   * @param {any} value A JSON stringify- and parsable value to store
+   * @param {Object} options
+   * @param {String} [folder=''] Optional folder for saving the item
+   */
   async setItem (key, value, { folder = '' } = {}) {
     const md5Key = Storage._md5(key)
     const dirPath = path.join(this._dir, folder)
@@ -48,6 +69,12 @@ class Storage {
     this._registerUpdateLocally(key, filePath)
   }
 
+  /**
+   * Asynchronously retrieves an item from the storage
+   *
+   * @param {String} key The key of the item
+   * @returns the value of the requested item
+   */
   async getItem (key) {
     const filePath = this._keyMap.get(key)
     if (!filePath) {
@@ -58,6 +85,11 @@ class Storage {
     return item?.value ?? null
   }
 
+  /**
+   * Asynchronously removes an item from the storage
+   *
+   * @param {String} key The key of the item
+   */
   async removeItem (key) {
     const filePath = this._keyMap.get(key)
     if (!filePath) {
@@ -69,6 +101,9 @@ class Storage {
     this._registerRemovalLocally(key, filePath)
   }
 
+  /**
+   * Clears the entire storage
+   */
   async clear ({ folder = '' } = {}) {
     const dir = path.join(this._dir, folder)
     await emptyDir(dir)
@@ -83,11 +118,9 @@ class Storage {
     }
   }
 
-  async copy (destinationDir, { folder = '' } = {}) {
-    const dir = path.join(this._dir, folder)
-    return fs.cp(dir, destinationDir, { recursive: true })
-  }
-
+  /**
+   * Clears all temporary files
+   */
   async cleanTemp () {
     const walk = async dir => {
       const entries = await fs.readdir(dir, { withFileTypes: true })
