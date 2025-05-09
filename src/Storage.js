@@ -9,7 +9,7 @@ const chokidar = require('chokidar')
 const TMP_MARKER = '.tmp'
 
 class Storage {
-  static _instances = new Set()
+  static _instances = {}
 
   /**
    * Constructs a storage instance for a given directory
@@ -25,7 +25,9 @@ class Storage {
     this._files = new Map()
     this._keyMap = new Map()
     this._modifiedByUs = new Set()
-    Storage._instances.add(this)
+    Storage._instances[dir] = Storage._instances[dir]
+      ? [...Storage._instances[dir], this]
+      : [this]
 
     try {
       fsSync.mkdirSync(this._dir, { recursive: true })
@@ -108,7 +110,7 @@ class Storage {
     const dir = path.join(this._dir, folder)
     await emptyDir(dir)
 
-    for (const instance of Storage._instances) {
+    for (const instance of Storage._instances[this._dir]) {
       for (const [key, filePath] of instance._keyMap.entries()) {
         if (filePath.startsWith(dir)) {
           instance._keyMap.delete(key)
@@ -140,14 +142,14 @@ class Storage {
   }
 
   _registerUpdateLocally (key, filePath) {
-    for (const instance of Storage._instances) {
+    for (const instance of Storage._instances[this._dir]) {
       instance._keyMap.set(key, filePath)
       instance._files.set(Storage._md5(key), filePath)
     }
   }
 
   _registerRemovalLocally (key, filePath) {
-    for (const instance of Storage._instances) {
+    for (const instance of Storage._instances[this._dir]) {
       instance._keyMap.delete(key)
       instance._files.delete(Storage._md5(key))
     }
