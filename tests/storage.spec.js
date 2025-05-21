@@ -86,10 +86,11 @@ describe('storage', () => {
       })
       let storage1
       let storage2
-      it('should allow to instantiate two storage instances', () => {
-        assert.throws(() => fs.accessSync(dir))
+      it('should return the same instance for the same directory', () => {
+        const dir = path.join(__dirname, 'test-storage')
         storage1 = new Storage({ dir })
         storage2 = new Storage({ dir })
+        assert.strictEqual(storage1, storage2)
         assert.equal(fs.accessSync(dir), undefined)
       })
       it('should support writing items in folder structures', async () => {

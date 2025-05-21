@@ -118,6 +118,17 @@ npm test
 
 ---
 
+⚠️ Known Limitation: OS-native bulk-clear and File Watchers
+
+Due to limitations in file system watchers like chokidar, bulk operations such
+as for example `fs-extra`’s `emptyDir` do not trigger file removal events.
+
+When these operations are executed externally, the `storage` instance may loose
+synchronization. In that case, it is advisable to re-create the instance which
+will leads to a re-synchronization.
+
+---
+
 ## 📜 License
 
 MIT – Built to be used in open-source and commercial projects alike.

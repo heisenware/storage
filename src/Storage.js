@@ -9,25 +9,35 @@ const chokidar = require('chokidar')
 const TMP_MARKER = '.tmp'
 
 class Storage {
-  static _instances = {}
+  static _registry = new Map()
 
   /**
-   * Constructs a storage instance for a given directory
+   * Constructs a Storage instance for a given directory.
+   * This constructor is idempotent: multiple calls with the same `dir` return the same instance.
    *
    * @param {Object} options
-   * @param {String} options.dir absolute path to the directory that should be used for storing JSON files
-   * @param {Object} [log=console] any custom logging instance
+   * @param {string} options.dir - Absolute path to the storage directory.
+   * @param {Object} [options.log=console] - Optional logger object.
+   * @returns {Storage} Singleton instance for the given directory.
    */
   constructor ({ dir, log = console }) {
+    if (Storage._registry.has(dir)) {
+      // make sure the directory still exists
+      fsSync.mkdirSync(dir, { recursive: true })
+      // make sure everything is synced again
+      const instance = Storage._registry.get(dir)
+      instance._scanDirectorySync(dir)
+      return instance
+    }
+
     this._dir = dir
     this._log = log
     this._queues = new Map()
     this._files = new Map()
     this._keyMap = new Map()
     this._modifiedByUs = new Set()
-    Storage._instances[dir] = Storage._instances[dir]
-      ? [...Storage._instances[dir], this]
-      : [this]
+
+    Storage._registry.set(dir, this)
 
     try {
       fsSync.mkdirSync(this._dir, { recursive: true })
@@ -40,10 +50,10 @@ class Storage {
   }
 
   /**
-   * Provides the keys of all items currently available
+   * Lists all keys currently stored, optionally filtered by a folder.
    *
-   * @param {String} [folder=''] If provided only keys stored within this folder are provided
-   * @returns Array of all stored item names
+   * @param {string} [folder=''] - Optional subfolder to scope the key list.
+   * @returns {string[]} Array of keys.
    */
   keys (folder = '') {
     const scopedPath = path.join(this._dir, folder)
@@ -53,12 +63,12 @@ class Storage {
   }
 
   /**
-   * Asynchronously stores a new item (key-value pair)
+   * Persists a key-value pair.
    *
-   * @param {String} key The key of the item
-   * @param {any} value A JSON stringify- and parsable value to store
-   * @param {Object} options
-   * @param {String} [folder=''] Optional folder for saving the item
+   * @param {string} key - The identifier to store.
+   * @param {*} value - JSON-serializable value to store.
+   * @param {Object} [options]
+   * @param {string} [options.folder=''] - Optional folder for scoped storage.
    */
   async setItem (key, value, { folder = '' } = {}) {
     const md5Key = Storage._md5(key)
@@ -68,14 +78,15 @@ class Storage {
     const content = { key, value }
     this._modifiedByUs.add(filePath)
     await this._writeFile(filePath, content)
-    this._registerUpdateLocally(key, filePath)
+    this._keyMap.set(key, filePath)
+    this._files.set(Storage._md5(key), filePath)
   }
 
   /**
-   * Asynchronously retrieves an item from the storage
+   * Retrieves a stored item.
    *
-   * @param {String} key The key of the item
-   * @returns the value of the requested item
+   * @param {string} key - The key to retrieve.
+   * @returns {Promise<*>} The stored value or null if not found.
    */
   async getItem (key) {
     const filePath = this._keyMap.get(key)
@@ -88,9 +99,9 @@ class Storage {
   }
 
   /**
-   * Asynchronously removes an item from the storage
+   * Removes a stored item.
    *
-   * @param {String} key The key of the item
+   * @param {string} key - The key to remove.
    */
   async removeItem (key) {
     const filePath = this._keyMap.get(key)
@@ -100,28 +111,45 @@ class Storage {
     }
     this._modifiedByUs.add(filePath)
     await this._deleteFile(filePath)
-    this._registerRemovalLocally(key, filePath)
+    this._keyMap.delete(key)
+    this._files.delete(Storage._md5(key))
   }
 
   /**
-   * Clears the entire storage
+   * Clears all stored data, optionally within a subfolder.
+   *
+   * @param {Object} [options]
+   * @param {string} [options.folder=''] - Subfolder to clear.
    */
   async clear ({ folder = '' } = {}) {
     const dir = path.join(this._dir, folder)
     await emptyDir(dir)
 
-    for (const instance of Storage._instances[this._dir]) {
-      for (const [key, filePath] of instance._keyMap.entries()) {
-        if (filePath.startsWith(dir)) {
-          instance._keyMap.delete(key)
-          instance._files.delete(Storage._md5(key))
-        }
+    for (const [key, filePath] of this._keyMap.entries()) {
+      if (filePath.startsWith(dir)) {
+        this._keyMap.delete(key)
+        this._files.delete(Storage._md5(key))
       }
     }
   }
 
   /**
-   * Clears all temporary files
+   * Copies the contents of the store to another directory.
+   *
+   * @param {string} destinationDir - The directory to copy to.
+   * @param {Object} [options]
+   * @param {string} [options.folder=''] - Optional subfolder to copy from.
+   * @returns {Promise<void>}
+   */
+  async copy (destinationDir, { folder = '' } = {}) {
+    const dir = path.join(this._dir, folder)
+    return fs.cp(dir, destinationDir, { recursive: true })
+  }
+
+  /**
+   * Removes leftover temporary files from previous failed writes.
+   *
+   * @returns {Promise<void>}
    */
   async cleanTemp () {
     const walk = async dir => {
@@ -139,20 +167,6 @@ class Storage {
 
   static _md5 (key) {
     return crypto.createHash('md5').update(key).digest('hex')
-  }
-
-  _registerUpdateLocally (key, filePath) {
-    for (const instance of Storage._instances[this._dir]) {
-      instance._keyMap.set(key, filePath)
-      instance._files.set(Storage._md5(key), filePath)
-    }
-  }
-
-  _registerRemovalLocally (key, filePath) {
-    for (const instance of Storage._instances[this._dir]) {
-      instance._keyMap.delete(key)
-      instance._files.delete(Storage._md5(key))
-    }
   }
 
   _scanDirectorySync (dir) {
@@ -186,6 +200,8 @@ class Storage {
     watcher.on('add', filePath => this._handleFileChange(filePath))
     watcher.on('change', filePath => this._handleFileChange(filePath))
     watcher.on('unlink', filePath => this._handleFileRemoval(filePath))
+
+    this._watcher = watcher
   }
 
   async _handleFileChange (filePath) {
@@ -198,7 +214,8 @@ class Storage {
       const content = await fs.readFile(filePath, 'utf-8')
       const json = JSON.parse(content)
       if (json?.key) {
-        this._registerUpdateLocally(json.key, filePath)
+        this._keyMap.set(json.key, filePath)
+        this._files.set(Storage._md5(json.key), filePath)
       }
     } catch (err) {
       this._log.warn(`Watcher failed to process ${filePath}: ${err.message}`)
@@ -211,7 +228,8 @@ class Storage {
     }
     for (const [key, path] of this._keyMap.entries()) {
       if (path === filePath) {
-        this._registerRemovalLocally(key, filePath)
+        this._keyMap.delete(key)
+        this._files.delete(Storage._md5(key))
         break
       }
     }
