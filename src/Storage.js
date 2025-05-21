@@ -24,17 +24,25 @@ class Storage {
     if (Storage._registry.has(dir)) {
       // make sure the directory still exists
       fsSync.mkdirSync(dir, { recursive: true })
-      // make sure everything is synced again
       const instance = Storage._registry.get(dir)
+      instance._keyMap = new Map()
+      instance._files = new Map()
+      this._queues = new Map()
+      instance._modifiedByUs = new Set()
       instance._scanDirectorySync(dir)
       return instance
     }
 
     this._dir = dir
     this._log = log
-    this._queues = new Map()
-    this._files = new Map()
+
+    // key -> md5
     this._keyMap = new Map()
+    // md5 -> filePath
+    this._files = new Map()
+    // filePath -> queue
+    this._queues = new Map()
+    // filePath
     this._modifiedByUs = new Set()
 
     Storage._registry.set(dir, this)
