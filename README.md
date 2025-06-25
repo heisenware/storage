@@ -90,19 +90,12 @@ List all stored keys, optionally scoped to a folder.
 
 Clear all entries (optionally in a subfolder).
 
-### `copy(destinationDir, { folder })`
-
-Copy stored files to a new location.
-
-### `cleanTemp()`
-
-Remove leftover temp files.
-
 ---
 
 ## 🔒 Atomicity & Concurrency
 
-Each file operation uses a per-file async queue (via `queue` package), ensuring that overlapping reads/writes don't corrupt files. Writes are staged to a temp file and atomically renamed.
+Each file operation uses a per-file async queue, ensuring that overlapping reads/writes don't corrupt files.
+This package is race-protected against concurrent file access withing the scope of a single-process.
 
 ---
 
@@ -125,7 +118,7 @@ as for example `fs-extra`’s `emptyDir` do not trigger file removal events.
 
 When these operations are executed externally, the `storage` instance may loose
 synchronization. In that case, it is advisable to re-create the instance which
-will leads to a re-synchronization.
+leads to a re-synchronization.
 
 ---
 

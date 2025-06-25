@@ -2,14 +2,16 @@ const fs = require('fs/promises')
 const path = require('path')
 const crypto = require('crypto')
 const { emptyDir } = require('fs-extra')
-const queue = require('queue')
 const fsSync = require('fs')
 const chokidar = require('chokidar')
 
 const TMP_MARKER = '.tmp'
 
 class Storage {
+  // dir -> instance
   static _registry = new Map()
+  // filePath -> Promise
+  static _pendingWrites = new Map()
 
   /**
    * Constructs a Storage instance for a given directory.
@@ -27,7 +29,7 @@ class Storage {
       const instance = Storage._registry.get(dir)
       instance._keyMap = new Map()
       instance._files = new Map()
-      this._queues = new Map()
+      instance._log = log
       instance._modifiedByUs = new Set()
       instance._scanDirectorySync(dir)
       return instance
@@ -40,17 +42,20 @@ class Storage {
     this._keyMap = new Map()
     // md5 -> filePath
     this._files = new Map()
-    // filePath -> queue
-    this._queues = new Map()
     // filePath
     this._modifiedByUs = new Set()
-
+    // instance registry
     Storage._registry.set(dir, this)
 
     try {
       fsSync.mkdirSync(this._dir, { recursive: true })
       this._scanDirectorySync(this._dir)
       this._startWatching()
+      this._cleanTemp().catch(err =>
+        this._log.warn(
+          `Failed cleaning temporary files, because: ${err.message}`
+        )
+      )
     } catch (err) {
       this._log.error(`Failed initializing storage directory: ${err.message}`)
       throw err
@@ -154,12 +159,14 @@ class Storage {
     return fs.cp(dir, destinationDir, { recursive: true })
   }
 
+  // Private
+
   /**
    * Removes leftover temporary files from previous failed writes.
    *
    * @returns {Promise<void>}
    */
-  async cleanTemp () {
+  async _cleanTemp () {
     const walk = async dir => {
       const entries = await fs.readdir(dir, { withFileTypes: true })
       for (const entry of entries) {
@@ -170,8 +177,6 @@ class Storage {
     }
     await walk(this._dir)
   }
-
-  // Private
 
   static _md5 (key) {
     return crypto.createHash('md5').update(key).digest('hex')
@@ -244,64 +249,48 @@ class Storage {
   }
 
   async _writeFile (filePath, content) {
-    const q = this._getQueue(filePath)
-    return new Promise((resolve, reject) => {
-      const job = async () => {
-        const tmpPath = `${filePath}${TMP_MARKER}-${Date.now()}`
+    return Storage._enqueue(filePath, async () => {
+      const tmpPath = `${filePath}${TMP_MARKER}-${Date.now()}`
+      try {
+        await fs.writeFile(tmpPath, JSON.stringify(content), 'utf-8')
+        await fs.rename(tmpPath, filePath)
+      } catch (err) {
+        this._log.error(`Failed writing ${filePath}: ${err.message}`)
         try {
-          await fs.writeFile(tmpPath, JSON.stringify(content), 'utf-8')
-          await fs.rename(tmpPath, filePath)
-          resolve()
-        } catch (err) {
-          this._log.error(`Failed writing ${filePath}: ${err.message}`)
-          try {
-            await fs.unlink(tmpPath)
-          } catch {}
-          reject(err)
-        }
+          await fs.unlink(tmpPath)
+        } catch {}
+        throw err
       }
-      q.push(job)
     })
   }
 
   async _readFile (filePath) {
-    const q = this._getQueue(filePath)
-    return new Promise((resolve, reject) => {
-      const job = async () => {
-        try {
-          const content = await fs.readFile(filePath, 'utf-8')
-          resolve(JSON.parse(content))
-        } catch (err) {
-          this._log.error(`Failed reading ${filePath}: ${err.message}`)
-          resolve(null)
-        }
+    return Storage._enqueue(filePath, async () => {
+      try {
+        const content = await fs.readFile(filePath, 'utf-8')
+        return JSON.parse(content)
+      } catch (err) {
+        this._log.error(`Failed reading ${filePath}: ${err.message}`)
+        return null
       }
-      q.push(job)
     })
   }
 
   async _deleteFile (filePath) {
-    const q = this._getQueue(filePath)
-    return new Promise((resolve, reject) => {
-      const job = async () => {
-        try {
-          await fs.unlink(filePath)
-          resolve()
-        } catch (err) {
-          this._log.error(`Failed deleting ${filePath}: ${err.message}`)
-          resolve()
-        }
+    return Storage._enqueue(filePath, async () => {
+      try {
+        await fs.unlink(filePath)
+      } catch (err) {
+        this._log.error(`Failed deleting ${filePath}: ${err.message}`)
       }
-      q.push(job)
     })
   }
 
-  _getQueue (id) {
-    if (!this._queues.has(id)) {
-      const q = queue({ concurrency: 1, autostart: true })
-      this._queues.set(id, q)
-    }
-    return this._queues.get(id)
+  static async _enqueue (filePath, fn) {
+    const last = Storage._pendingWrites.get(filePath) || Promise.resolve()
+    const next = last.then(fn).catch(() => {})
+    Storage._pendingWrites.set(filePath, next)
+    return next
   }
 }
 

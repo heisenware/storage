@@ -17,8 +17,8 @@ describe('storage', () => {
       storage = new Storage({ dir })
       assert.equal(fs.accessSync(dir), undefined)
     })
-    it('should report to have no keys', async () => {
-      const keys = await storage.keys()
+    it('should report to have no keys', () => {
+      const keys = storage.keys()
       assert.deepEqual(keys, [])
     })
     context('read / write items', () => {
@@ -33,6 +33,31 @@ describe('storage', () => {
         const item = await storage.getItem('item1')
         assert.deepEqual(item, { just: 'a test of item1' })
       })
+      it('should store and retrieve a 50MB item', async () => {
+        const bigPayload = { data: 'x'.repeat(50 * 1024 * 1024) } // ~50MB string
+        await storage.setItem('big-item', bigPayload)
+        const readBack = await storage.getItem('big-item')
+        assert.deepEqual(readBack, bigPayload)
+      })
+      it('should detect external file changes via chokidar watcher', async () => {
+        const key = 'watched-key'
+        const value1 = { key, value: 'first' }
+        const value2 = { key, value: 'updated' }
+        const filePath = path.join(storage._dir, Storage._md5(key))
+
+        // simulate external creation
+        await fs.writeJson(filePath, value1)
+        await new Promise(resolve => setTimeout(resolve, 50)) // let watcher pick it up
+        let fetched = await storage.getItem(key)
+        assert.deepEqual(fetched, 'first')
+
+        // simulate external modification
+        await fs.writeJson(filePath, value2)
+        await new Promise(resolve => setTimeout(resolve, 50))
+        fetched = await storage.getItem(key)
+        assert.deepEqual(fetched, 'updated')
+      })
+
       it('should properly handle concurrent reads and writes', async () => {
         const contents = Array(100)
           .fill(0)
@@ -71,7 +96,7 @@ describe('storage', () => {
       })
       it('should clear the entire storage', async () => {
         await storage.clear()
-        const keys = await storage.keys()
+        const keys = storage.keys()
         assert.deepEqual(keys, [])
       })
     })
@@ -120,7 +145,7 @@ describe('storage', () => {
       })
       it('should clear the entire storage', async () => {
         await storage1.clear()
-        const keys = await storage2.keys()
+        const keys = storage2.keys()
         assert.deepEqual(keys, [])
       })
     }
@@ -133,8 +158,8 @@ describe('storage', () => {
       assert.equal(fs.accessSync(dir), undefined)
       storage = new Storage({ dir })
     })
-    it('should report to have two keys', async () => {
-      const keys = await storage.keys()
+    it('should report to have two keys', () => {
+      const keys = storage.keys()
       assert.deepEqual(keys, ['test-002', 'test-001'])
     })
     it('should not fail on broken items', async () => {
