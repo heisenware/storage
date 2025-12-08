@@ -27,11 +27,20 @@ class Storage {
       // make sure the directory still exists
       fsSync.mkdirSync(dir, { recursive: true })
       const instance = Storage._registry.get(dir)
+      // if a watcher exists, detach listeners immediately to ignore
+      // any pending/stale events (like the race-condition 'unlinks')
+      if (instance._watcher) {
+        instance._watcher.removeAllListeners()
+        // asynchronously close the old watcher to free resources
+        instance._watcher.close().catch(() => {})
+      }
       instance._keyMap = new Map()
       instance._files = new Map()
       instance._log = log
       instance._modifiedByUs = new Set()
       instance._scanDirectorySync(dir)
+      // Start a fresh watcher for the new state
+      instance._startWatching()
       return instance
     }
 
