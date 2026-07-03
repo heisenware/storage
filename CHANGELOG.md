@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - unreleased
+
+### Breaking Changes
+
+- **Removed MD5 Hashing:** Files are no longer obfuscated with MD5 hashes. Keys are now strictly sanitized and saved as readable `<key>.json` files.
+- **Removed `copy()`:** Duplicating the database via raw filesystem copies is an architectural anti-pattern with the introduction of Git. Use `git` remotes or branches for backups and environment duplication.
+- **Requires Git:** To utilize version control features, `git` must be installed on the host system.
+
+### Added
+
+- **Native Git Integration:** First-class support for version control. Storage can now act as a versioned database.
+- **New API Methods:** - `commit(message)`: Safely commit disk changes with smart auto-generated commit messages.
+  - `getGitStatus()`: Retrieve current working tree status (clean, added, modified, deleted) mapped directly to your storage keys.
+  - `createBranch(name)` & `checkout(name)`: Safely swap environments. Watchers are automatically locked and memory maps re-synced to prevent race conditions.
+  - `push()` & `pull()`: Synchronize state across distributed systems.
+- **Migration Utility:** Added `Storage.migrateFromV1(dir)` to easily upgrade existing MD5-based storage directories to the new readable V2 format.
+
+### Security
+
+- **Path Traversal Protection:** Added rigorous sanitization (`_sanitizeKey` and `_sanitizeFolder`) to prevent malicious keys or folders from escaping the root storage directory (e.g., preventing `../../../etc/passwd` exploits).
+
+### Fixed
+
+- **Circular JSON Crash:** Fixed a critical bug in the concurrency queue (`_enqueue`) where `TypeError` exceptions from circular object references were silently swallowed, leaving pending Promises unresolved.
+- **Protected `clear()`:** Calling `storage.clear()` at the root level now gracefully deletes data while strictly preserving `.git` and `.gitignore` files.
+
 ## [1.2.3]
 
 ### Fixed

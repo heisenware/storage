@@ -1,133 +1,141 @@
-# Persistent JSON Storage
+# Persistent Git-Backed JSON Storage
 
-A lightweight, class-based JSON storage module for Node.js that uses the filesystem for persisting structured key-value data. Designed for **atomic writes**, **cross-instance sync**, and **watch-based reactivity**, it's perfect for local persistence, caching, or lightweight state management.
-
----
-
-## 🚀 Features
-
-- **Safe, atomic writes** (temp file + rename strategy)
-- **Supports nested folders** for scoped persistence
-- **Queue-based concurrency** ensures safe access per file
-- **Multi-instance aware**: storage stays in sync across instances
-- **Real-time sync** using filesystem watchers (`chokidar`)
-- **Automatic cleanup** of temp files
-- **Efficient key indexing** via MD5-hashed filenames
+A lightweight, class-based JSON storage module for Node.js that uses the
+filesystem for persisting structured key-value data. Designed for **atomic
+writes**, **cross-instance sync**, and **first-class Git version control**, it's
+perfect for local persistence, auditable databases, branching test environments,
+or lightweight state management.
 
 ---
 
-## 📦 Installation
+## Features
+
+- **Version Controlled**: native Git snapshotting, branching, and remote syncing.
+- **Safe, atomic writes** (temp file + rename strategy).
+- **Human-Readable Files**: keys are saved as beautifully transparent `.json` files.
+- **Supports nested folders** for scoped persistence.
+- **Queue-based concurrency** ensures safe access per file.
+- **Multi-instance aware**: storage stays in sync across instances via `chokidar`.
+
+---
+
+## Installation
 
 ```bash
-npm install @heisenware/storage
+npm install @heisenware/storage simple-git
 ```
+
+_(Note: Requires the native `git` binary installed on your host OS or Docker image)._
 
 ---
 
-## ✨ Usage
+## Usage
 
 ```js
 const Storage = require('@heisenware/storage')
 
-const storage = new Storage({ dir: '/tmp/my-app-store' })
+const storage = new Storage({
+  dir: '/tmp/my-app-store',
+  git: { init: true } // Automatically sets up a Git repository
+})
 
-await storage.setItem('user123', { name: 'Alice', active: true })
-const user = await storage.getItem('user123')
+await storage.setItem('user-123', { name: 'Alice', active: true })
+const user = await storage.getItem('user-123')
 console.log(user) // { name: 'Alice', active: true }
 
-await storage.removeItem('user123')
-await storage.clear() // clears all stored entries
+// Snapshot the state
+await storage.commit('chore: update alice')
+
+// Create a test environment, make changes, and discard them
+await storage.createBranch('destructive-tests')
+await storage.checkout('destructive-tests')
+await storage.clear()
+await storage.checkout('master') // Memory map instantly resyncs to safe data!
 ```
 
 ---
 
-## 📁 Folder Support
+## Folder Support
 
-Store and query items within custom subfolders:
+Store and query items within custom subfolders. Path traversal is rigorously
+prevented.
 
 ```js
-await storage.setItem('session42', { token: 'abc' }, { folder: 'sessions' })
-const keys = await storage.keys('sessions') // ['session42']
+await storage.setItem('session-42', { token: 'abc' }, { folder: 'sessions' })
+const keys = await storage.keys('sessions') // ['session-42']
 ```
 
 ---
 
-## 🧠 Internal Design
+## Internal Design
 
-- Files are named using `MD5(key)` to avoid path issues.
+- Files are directly named `<key>.json` for human-readability and clean Git
+  diffs.
 - Each entry is stored as a single JSON file: `{ key, value }`.
 - Temp files use `.tmp-<timestamp>` suffix and are cleaned if needed.
-- `chokidar` watches for external changes and updates all instances.
+- `chokidar` watches for external changes and updates all instances. Watchers
+  are safely paused during Git branch checkouts.
 
 ---
 
-## 🛠 API
+## API
 
-### `new Storage({ dir, log })`
+### `new Storage({ dir, log, git })`
 
 Create a storage instance.
 
 - `dir`: absolute path to storage directory
 - `log`: optional logger (defaults to `console`)
+- `git`: optional config `{ init: boolean, remote: string }`.
 
-### `setItem(key, value, { folder })`
+### Data Operations
 
-Persist a key-value pair.
+- `setItem(key, value, { folder })`: Persist a key-value pair.
+- `getItem(key)`: Retrieve a previously stored value.
+- `removeItem(key)`: Delete an entry.
+- `keys(folder)`: List all stored keys, optionally scoped to a folder.
+- `clear({ folder })`: Clear entries. Protects `.git` files if clearing the root.
 
-### `getItem(key)`
+### Git Operations
 
-Retrieve a previously stored value.
+- `getGitStatus()`: Returns an object `{ branch, isClean, added, modified,
+  deleted }` mapping directly to your keys.
+- `commit(message)`: Commits changes. Auto-generates a smart message if none is
+  provided.
+- `createBranch(name)` / `checkout(name)`: Swaps Git branches and instantly
+  resyncs memory.
+- `push()` / `pull()`: Synchronizes with remote Git endpoints.
 
-### `removeItem(key)`
+### Utility
 
-Delete an entry.
-
-### `keys(folder)`
-
-List all stored keys, optionally scoped to a folder.
-
-### `clear({ folder })`
-
-Clear all entries (optionally in a subfolder).
-
----
-
-## 🔒 Atomicity & Concurrency
-
-Each file operation uses a per-file async queue, ensuring that overlapping reads/writes don't corrupt files.
-This package is race-protected against concurrent file access withing the scope of a single-process.
+- `Storage.migrateFromV1(dir)`: One-time utility to unpack V1 (MD5 hashed)
+  databases into V2 formats.
 
 ---
 
-## ✅ Tests
+## Architecture & Multi-Process Guidelines
 
-Includes a full integration test suite for reading, writing, concurrency, and multi-instance interaction.
+### Multi-Process Isolation
 
-To run:
+If multiple independent Node.js processes need to use the storage library
+simultaneously, **do not point them at the same root directory**. Point them at
+dedicated subdirectories:
 
-```bash
-npm test
+```js
+// CORRECT (Complete isolation)
+const procA = new Storage({ dir: '/shared/data/procA' })
+const procB = new Storage({ dir: '/shared/data/procB' })
 ```
 
----
+### Docker Volumes
 
-⚠️ Known Limitation: OS-native bulk-clear and File Watchers
-
-Due to limitations in file system watchers like chokidar, bulk operations such
-as for example `fs-extra`’s `emptyDir` do not trigger file removal events.
-
-When these operations are executed externally, the `storage` instance may loose
-synchronization. In that case, it is advisable to re-create the instance which
-leads to a re-synchronization.
+When running on **Linux**, Docker bind-mounts natively propagate `inotify`
+events, so the `chokidar` watcher runs with near-zero overhead. If you run this
+on macOS/Windows Docker Desktop, you may need to enable `usePolling` in Chokidar
+for real-time sync.
 
 ---
 
-## 📜 License
+## License
 
 MIT – Built to be used in open-source and commercial projects alike.
-
----
-
-## 💡 Contributing
-
-Contributions, bug reports, and PRs are welcome. Let’s make local storage a breeze for Node.js!
