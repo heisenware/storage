@@ -270,15 +270,31 @@ class Storage {
   }
 
   /**
-   * Checks out an existing Git branch. This safely locks file watchers,
+   * Checks out an existing Git branch, tag, or commit. Safely locks file watchers,
    * updates the filesystem, and re-syncs the in-memory key map.
+   * Smart Checkout: If the target is a tag or commit, this method automatically
+   * attaches the current branch to it, preventing a detached HEAD state.
    *
-   * @param {string} branchName - The target branch to checkout.
+   * @param {string} branchOrTagName - The target branch, tag, or commit hash.
+   * @param {string} [targetBranch] - Optional. Explicitly provide a different branch name to attach to the target.
    * @returns {Promise<void>}
    */
-  async checkout (branchName) {
+  async checkout (branchOrTagName, targetBranch) {
     if (!this._gitManager) throw new Error('Git integration is not enabled.')
-    return this._gitManager.checkout(branchName)
+    return this._gitManager.checkout(branchOrTagName, targetBranch)
+  }
+
+  /**
+   * Creates a Git tag at the current state.
+   * Useful for snapshotting specific milestones (e.g., 'v1.0.0' or 'backup-2026').
+   *
+   * @param {string} tagName - The name of the tag to create.
+   * @param {string} [message] - Optional message to create an annotated tag.
+   * @returns {Promise<void>}
+   */
+  async createTag (tagName, message) {
+    if (!this._gitManager) throw new Error('Git integration is not enabled.')
+    return this._gitManager.createTag(tagName, message)
   }
 
   /**

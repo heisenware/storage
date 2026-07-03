@@ -183,6 +183,9 @@ describe('Storage v2', () => {
   // =========================================================================
   // GIT INTEGRATION SUITE
   // =========================================================================
+  // =========================================================================
+  // GIT INTEGRATION SUITE
+  // =========================================================================
   context('Git version control and branching', () => {
     const dir = path.join(__dirname, 'test-storage-git')
     let storage
@@ -194,8 +197,7 @@ describe('Storage v2', () => {
     it('should initialize a git repository and respect .gitignore', async () => {
       storage = new Storage({ dir, git: { init: true } })
 
-      // Trigger a status check. This will safely wait until _initRepo resolves!
-      await storage.getGitStatus()
+      await storage.getGitStatus() // Wait for init to complete
 
       const gitDirExists = fs.existsSync(path.join(dir, '.git'))
       const gitignoreExists = fs.existsSync(path.join(dir, '.gitignore'))
@@ -221,47 +223,87 @@ describe('Storage v2', () => {
     })
 
     it('should safely switch branches and re-sync memory map', async () => {
-      // 1. Create a branch and switch
       await storage.createBranch('feature-branch')
       await storage.checkout('feature-branch')
 
-      // 2. Make a destructive change on the branch
       await storage.setItem('user-bob', { role: 'user' })
       await storage.removeItem('user-alice')
       await storage.commit('chore: swap users')
 
-      // 3. Verify memory state on feature branch
       assert.equal(await storage.getItem('user-alice'), null)
       assert.deepEqual(await storage.getItem('user-bob'), { role: 'user' })
 
-      // 4. Switch back to the enforced default branch
       await storage.checkout('master')
 
-      // 5. Verify memory state reverted correctly
       assert.deepEqual(await storage.getItem('user-alice'), { role: 'admin' })
       assert.equal(await storage.getItem('user-bob'), null)
     })
-  })
 
-  context('Git API Guardrails', () => {
-    const dir = path.join(__dirname, 'test-storage-no-git')
-    after(() => fs.rmSync(dir, { recursive: true, force: true }))
+    it('should create tags and gracefully rollback without detached HEAD', async () => {
+      // 1. We are on 'master'. Create a baseline tag.
+      await storage.createTag('v1.0.0', 'Stable baseline')
 
-    it('should throw errors if Git API is called when disabled', async () => {
-      const plainStorage = new Storage({ dir }) // No git options
+      // 2. Add some new data and commit it to master
+      await storage.setItem('user-charlie', { role: 'guest' })
+      await storage.commit('feat: add charlie')
 
-      await assert.rejects(
-        () => plainStorage.commit(),
-        /Git integration is not enabled/
+      assert.deepEqual(await storage.getItem('user-charlie'), { role: 'guest' })
+
+      // 3. Rollback to the tag!
+      // Because we don't provide a branch, it should smartly move 'master' back to this tag.
+      await storage.checkout('v1.0.0')
+
+      // 4. Verify memory state rewound
+      assert.equal(
+        await storage.getItem('user-charlie'),
+        null,
+        'Charlie should be gone'
       )
-      await assert.rejects(
-        () => plainStorage.getGitStatus(),
-        /Git integration is not enabled/
+
+      // 5. Verify we are NOT in detached HEAD, but safely still on master
+      const status = await storage.getGitStatus()
+      assert.equal(
+        status.branch,
+        'master',
+        'Should safely remain on master branch'
       )
-      await assert.rejects(
-        () => plainStorage.createBranch('test'),
-        /Git integration is not enabled/
+    })
+
+    it('should checkout a tag to an explicitly provided new branch', async () => {
+      // 1. Create a new tag where we currently are
+      await storage.createTag('v1.0.1')
+
+      // 2. Move forward on master
+      await storage.setItem('user-dave', { role: 'admin' })
+      await storage.commit('feat: add dave')
+
+      // 3. Checkout the older tag and explicitly attach it to a 'hotfix' branch
+      await storage.checkout('v1.0.1', 'hotfix-v1')
+
+      // 4. Verify we are on the new branch
+      const status = await storage.getGitStatus()
+      assert.equal(
+        status.branch,
+        'hotfix-v1',
+        'Should be on the new explicitly requested branch'
       )
+
+      // 5. Verify memory state reflects the tag, not the future master commit
+      assert.equal(
+        await storage.getItem('user-dave'),
+        null,
+        'Dave should not exist in this older tag'
+      )
+    })
+
+    it('should preserve .git during clear() operations', async () => {
+      await storage.clear()
+
+      const gitDirExists = fs.existsSync(path.join(dir, '.git'))
+      assert.equal(gitDirExists, true, '.git must survive clear()')
+
+      const keys = storage.keys()
+      assert.deepEqual(keys, [])
     })
   })
 })

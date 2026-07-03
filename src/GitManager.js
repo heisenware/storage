@@ -116,12 +116,47 @@ class GitManager {
     await this.git.checkoutLocalBranch(branchName)
   }
 
-  async checkout (branchName) {
+  async createTag (tagName, message = null) {
     await this.initPromise // Wait for init to finish!
+
+    if (message) {
+      await this.git.addAnnotatedTag(tagName, message)
+    } else {
+      await this.git.addTag(tagName)
+    }
+  }
+
+  // Add this helper method inside GitManager
+  async _isLocalBranch (name) {
+    const branches = await this.git.branchLocal()
+    return branches.all.includes(name)
+  }
+
+  // Update the checkout method in src/GitManager.js
+  async checkout (branchOrTagName, targetBranch = null) {
+    await this.initPromise
 
     this.storage._gitLock = true
     try {
-      await this.git.checkout(branchName)
+      if (targetBranch) {
+        // Explicitly requested a new/different branch to be attached to the target
+        await this.git.checkout(['-B', targetBranch, branchOrTagName])
+      } else {
+        const isBranch = await this._isLocalBranch(branchOrTagName)
+
+        if (isBranch) {
+          // It's an existing branch, just switch to it natively
+          await this.git.checkout(branchOrTagName)
+        } else {
+          // It's a tag or commit. Default to attaching the *current* branch to it!
+          // FIX: Get the current branch directly from git status
+          const status = await this.git.status()
+          const currentBranch = status.current
+
+          await this.git.checkout(['-B', currentBranch, branchOrTagName])
+        }
+      }
+
       this.storage._keyMap.clear()
       this.storage._scanDirectorySync(this.storage._dir)
     } finally {
