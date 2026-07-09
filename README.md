@@ -2,6 +2,7 @@
 
 [![neostandard](https://img.shields.io/badge/code_style-neostandard-brightgreen?style=flat)](https://github.com/neostandard/neostandard)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![CI](https://github.com/heisenware/storage/actions/workflows/ci.yaml/badge.svg)
 
 A lightweight, class-based JSON storage module for Node.js that uses the
 filesystem for persisting structured key-value data. Designed for **atomic
@@ -143,16 +144,18 @@ also reach repositories that were initialized earlier.
 
 ## API
 
-### `new Storage({ dir, log, git, watch })`
+### `await Storage.open({ dir, log, git, watch, exclusive })`
 
-Create a storage instance. The constructor is idempotent: calling it again
-with the same `dir` returns the same (re-synced) instance.
+Opens (or re-opens) the storage for a directory — the only way to obtain an
+instance; direct construction throws. The first call creates a fully
+initialized instance (a resolved `open()` includes Git setup); subsequent
+calls return the existing instance with a rescanned key map.
 
 - `dir`: absolute path to storage directory
 - `log`: optional logger (defaults to `console`)
-- `git`: optional config `{ init: boolean, remote: string, ignore: string[] }`
-- `watch`: optional boolean (defaults to `true`); set to `false` to skip the
-  filesystem watcher for directories that receive no external modifications
+- `git`: optional config `{ init: boolean, remote: string, branch: string, ignore: string[] }`
+- `watch`: optional boolean (default `true`); `false` skips the filesystem watcher
+- `exclusive`: optional boolean (default `false`); claims sole cross-process ownership
 
 ### Data Operations
 
@@ -199,17 +202,28 @@ with the same `dir` returns the same (re-synced) instance.
 
 ## Architecture & Multi-Process Guidelines
 
-### Multi-Process Isolation
+### Multi-Process Contract
 
-If multiple independent Node.js processes need to use the storage library
-simultaneously, **do not point them at the same root directory**. Point them at
-dedicated subdirectories:
+Multiple processes may share the same storage directory. The library
+guarantees:
+
+- **Reads converge** across processes via filesystem watchers.
+- **Writes are atomic** (temp file + rename); ordering is guaranteed per
+  process (last caller wins) — across processes, last-rename-wins.
+- **Git operations and root `clear()` are mutually exclusive** across
+  processes through an advisory lock with automatic staleness recovery.
+  While one process performs a mass mutation (checkout, clear), the
+  watchers of all other processes pause and resync afterwards.
+- **Exclusive ownership** is available on demand:
 
 ```js
-// CORRECT (Complete isolation)
-const procA = new Storage({ dir: '/shared/data/procA' })
-const procB = new Storage({ dir: '/shared/data/procB' })
+// Throws immediately if another live process owns the directory
+const storage = await Storage.open({ dir: '/shared/data/app1', exclusive: true })
 ```
+
+Supported topology: processes on the same host (including Docker volumes on
+Linux). Network filesystems (NFS) make both `inotify` and lock staleness
+unreliable and are not supported.
 
 ### Docker Volumes
 

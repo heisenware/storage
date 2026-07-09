@@ -20,9 +20,9 @@ describe('Git version control and branching', () => {
   })
 
   it('initializes a git repository and writes a .gitignore', async () => {
-    storage = new Storage({ dir, log: silentLog, git: { init: true } })
-
-    await storage.getGitStatus() // wait for init to complete
+    // open() resolves only when the repository is fully initialized -
+    // no "wait for init" dance needed anymore
+    storage = await Storage.open({ dir, log: silentLog, git: { init: true } })
 
     expect(fs.existsSync(path.join(dir, '.git'))).toBe(true)
     expect(fs.existsSync(path.join(dir, '.gitignore'))).toBe(true)
@@ -147,6 +147,29 @@ describe('Git version control and branching', () => {
 })
 
 // ===========================================================================
+// CONFIGURABLE DEFAULT BRANCH
+// ===========================================================================
+describe('configurable default branch', () => {
+  const dir = path.join(__dirname, 'test-storage-git-main')
+
+  afterAll(async () => {
+    await Storage.dispose(dir)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('initializes fresh repositories on the configured branch', async () => {
+    const storage = await Storage.open({
+      dir,
+      log: silentLog,
+      git: { init: true, branch: 'main' }
+    })
+
+    const status = await storage.getGitStatus()
+    expect(status.branch).toBe('main')
+  })
+})
+
+// ===========================================================================
 // CONSUMER-PROVIDED IGNORE PATTERNS
 // ===========================================================================
 describe('consumer-provided .gitignore patterns', () => {
@@ -158,12 +181,11 @@ describe('consumer-provided .gitignore patterns', () => {
   })
 
   it('merges options.ignore into the generated .gitignore', async () => {
-    const storage = new Storage({
+    await Storage.open({
       dir,
       log: silentLog,
       git: { init: true, ignore: ['state/'] }
     })
-    await storage.getGitStatus() // wait for init
 
     const gitignore = fs.readFileSync(path.join(dir, '.gitignore'), 'utf-8')
     expect(gitignore).toContain('*.tmp-*')
@@ -171,7 +193,7 @@ describe('consumer-provided .gitignore patterns', () => {
   })
 
   it('keeps ignored folders invisible to status and commit', async () => {
-    const storage = new Storage({
+    const storage = await Storage.open({
       dir,
       log: silentLog,
       git: { init: true, ignore: ['state/'] }
@@ -190,15 +212,14 @@ describe('consumer-provided .gitignore patterns', () => {
   })
 
   it('syncs new ignore patterns into EXISTING repositories', async () => {
-    // Re-construct after dispose with an extended pattern list: the idempotent
+    // Re-open after dispose with an extended pattern list: the idempotent
     // .gitignore sync must update repositories initialized before the change
     await Storage.dispose(dir)
-    const storage = new Storage({
+    await Storage.open({
       dir,
       log: silentLog,
       git: { init: true, ignore: ['state/', 'cache/'] }
     })
-    await storage.getGitStatus() // wait for init (which runs the sync)
 
     const gitignore = fs.readFileSync(path.join(dir, '.gitignore'), 'utf-8')
     expect(gitignore).toContain('cache/')
@@ -225,7 +246,7 @@ describe('push and pull against a local bare remote', () => {
   })
 
   it('pushes local commits to the configured remote', async () => {
-    storage = new Storage({
+    storage = await Storage.open({
       dir,
       log: silentLog,
       git: { init: true, remote: remoteDir }
@@ -255,7 +276,7 @@ describe('push and pull against a local bare remote', () => {
     execSync('git reset --hard HEAD~1', { cwd: dir })
     // Rebuild the memory map from the rewound working tree
     await Storage.dispose(dir)
-    storage = new Storage({
+    storage = await Storage.open({
       dir,
       log: silentLog,
       git: { init: true, remote: remoteDir }

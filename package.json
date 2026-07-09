@@ -1,8 +1,24 @@
 {
   "name": "@heisenware/storage",
-  "version": "1.2.3",
+  "version": "2.0.0",
   "description": "Efficient and robust JSON file storage",
-  "main": "index.js",
+  "main": "./src/Storage.js",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./index.mjs",
+      "require": "./src/Storage.js"
+    }
+  },
+  "files": [
+    "src",
+    "types",
+    "index.mjs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "jest",
     "test:coverage": "jest --coverage",
@@ -26,6 +42,7 @@
   "dependencies": {
     "chokidar": "^4.0.3",
     "fs-extra": "^11.1.1",
+    "proper-lockfile": "^4.1.2",
     "simple-git": "^3.36.0"
   },
   "devDependencies": {

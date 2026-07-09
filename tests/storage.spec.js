@@ -32,9 +32,9 @@ describe('core operations on an initially empty store', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
-  it('creates an empty directory when nothing exists', () => {
+  it('creates an empty directory when nothing exists', async () => {
     expect(() => fs.accessSync(dir)).toThrow()
-    storage = new Storage({ dir, log: silentLog })
+    storage = await Storage.open({ dir, log: silentLog })
     expect(fs.accessSync(dir)).toBeUndefined()
   })
 
@@ -60,6 +60,7 @@ describe('core operations on an initially empty store', () => {
 
   it('writes and reads back a single item', async () => {
     await storage.setItem('item1', { just: 'a test of item1' })
+    expect(storage.has('item1')).toBe(true)
     await expect(storage.getItem('item1')).resolves.toEqual({
       just: 'a test of item1'
     })
@@ -145,6 +146,7 @@ describe('core operations on an initially empty store', () => {
 
   it('removes items', async () => {
     await storage.removeItem('item2')
+    expect(storage.has('item2')).toBe(false)
     await expect(storage.getItem('item2')).resolves.toBeNull()
   })
 
@@ -166,9 +168,9 @@ describe('folder support and the singleton registry', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
-  it('returns the same instance for the same directory', () => {
-    storage1 = new Storage({ dir, log: silentLog })
-    storage2 = new Storage({ dir, log: silentLog })
+  it('returns the same instance for the same directory', async () => {
+    storage1 = await Storage.open({ dir, log: silentLog })
+    storage2 = await Storage.open({ dir, log: silentLog })
     expect(storage1).toBe(storage2)
   })
 
@@ -207,8 +209,8 @@ describe('lifecycle management', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
-  it('does not observe external changes when constructed with watch: false', async () => {
-    const storage = new Storage({ dir, log: silentLog, watch: false })
+  it('does not observe external changes when opened with watch: false', async () => {
+    const storage = await Storage.open({ dir, log: silentLog, watch: false })
     expect(storage._watcher).toBeNull()
 
     // simulate an external write
@@ -220,19 +222,19 @@ describe('lifecycle management', () => {
     await expect(storage.getItem('external-key')).resolves.toBeNull()
   })
 
-  it('picks up on-disk state via the rescan of a re-construction', async () => {
-    // The singleton registry path rescans the directory
-    const storage = new Storage({ dir, log: silentLog, watch: false })
+  it('picks up on-disk state via the rescan of a re-open', async () => {
+    // The reuse path of open() rescans the directory
+    const storage = await Storage.open({ dir, log: silentLog, watch: false })
     await expect(storage.getItem('external-key')).resolves.toBe(42)
   })
 
   it('dispose() de-registers the instance so a fresh one can be created', async () => {
-    const before = new Storage({ dir, log: silentLog })
+    const before = await Storage.open({ dir, log: silentLog })
     await before.setItem('persistent', { survives: 'disposal' })
     await before.dispose()
 
-    // A new construction must yield a NEW instance (registry was cleaned) ...
-    const after = new Storage({ dir, log: silentLog })
+    // A new open() must yield a NEW instance (registry was cleaned) ...
+    const after = await Storage.open({ dir, log: silentLog })
     expect(after).not.toBe(before)
 
     // ... while the data on disk is untouched
@@ -264,7 +266,7 @@ describe('migration from v1 (MD5) storage layout', () => {
 
   it('converts legacy MD5 files into key.json files', async () => {
     await Storage.migrateFromV1(dir)
-    const storage = new Storage({ dir, log: silentLog })
+    const storage = await Storage.open({ dir, log: silentLog })
 
     expect(storage.keys().sort()).toEqual(['test-001', 'test-002'])
     await expect(storage.getItem('test-001')).resolves.toEqual({
@@ -276,8 +278,8 @@ describe('migration from v1 (MD5) storage layout', () => {
   it('leaves broken and temporary legacy files alone', async () => {
     // The un-parseable fixture files must neither crash the migration
     // nor appear as keys
-    const storage = new Storage({ dir, log: silentLog })
-    expect(storage.keys()).not.toContain('broken')
+    const storage = await Storage.open({ dir, log: silentLog })
+    expect(storage.has('broken')).toBe(false)
   })
 
   it('preserves falsy values (0, false, null, empty string) during migration', async () => {
@@ -296,7 +298,7 @@ describe('migration from v1 (MD5) storage layout', () => {
       })
 
       await Storage.migrateFromV1(falsyDir)
-      const storage = new Storage({ dir: falsyDir, log: silentLog })
+      const storage = await Storage.open({ dir: falsyDir, log: silentLog })
 
       expect(storage.keys().sort()).toEqual(['empty', 'no', 'zero'])
       await expect(storage.getItem('zero')).resolves.toBe(0)

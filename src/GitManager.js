@@ -2,11 +2,16 @@
 const { simpleGit } = require('simple-git')
 const fs = require('fs/promises')
 const path = require('path')
+const { OP_LOCK, OWNER_LOCK } = require('./constants')
 
 /**
  * Encapsulates all Git operations for a Storage instance: repository
  * initialization, staging and committing, branching, tagging, checkouts,
  * and remote synchronization.
+ *
+ * Every mutating operation runs under the storage's cross-process
+ * operation lock, so compound sequences (add -> status -> commit,
+ * checkout -> rescan, ...) never interleave between processes.
  *
  * An instance is created by Storage when Git options are provided and is
  * never used standalone.
@@ -19,10 +24,12 @@ class GitManager {
    * @param {Object} [options={}] - Git integration options.
    * @param {boolean} [options.init] - Initialize a repository if none exists yet.
    * @param {string} [options.remote] - Optional remote URL to register as 'origin'.
+   * @param {string} [options.branch='master'] - Default branch name used when
+   *   initializing a fresh repository.
    * @param {string[]} [options.ignore=[]] - Additional .gitignore patterns supplied
    *   by the consumer (e.g., ['state/'] to keep runtime state out of version
-   *   control). These are merged with the built-in temp-file pattern and synced
-   *   to the repository's .gitignore on every startup.
+   *   control). These are merged with the built-in patterns and synced to the
+   *   repository's .gitignore on every startup.
    */
   constructor (storageInstance, options = {}) {
     this.storage = storageInstance
@@ -35,55 +42,60 @@ class GitManager {
 
   /**
    * Initializes the local repository if required and synchronizes the
-   * .gitignore file with the configured patterns.
+   * .gitignore file with the configured patterns. Runs under the
+   * cross-process lock so two processes racing on a fresh directory
+   * cannot double-initialize.
    *
    * @private
    * @returns {Promise<void>}
    */
   async _initRepo () {
     try {
-      // DO NOT use checkIsRepo() as it detects parent repositories up the tree.
-      // Explicitly check if a .git folder exists in this specific directory.
-      const gitDir = path.join(this.storage._dir, '.git')
-      const isLocalRepo = await fs
-        .access(gitDir)
-        .then(() => true)
-        .catch(() => false)
+      await this.storage._withOpLock(async () => {
+        // DO NOT use checkIsRepo() as it detects parent repositories up the tree.
+        // Explicitly check if a .git folder exists in this specific directory.
+        const gitDir = path.join(this.storage._dir, '.git')
+        const isLocalRepo = await fs
+          .access(gitDir)
+          .then(() => true)
+          .catch(() => false)
 
-      if (!isLocalRepo) {
-        await this.git.init(['-b', 'master'])
+        if (!isLocalRepo) {
+          const branch = this.options.branch || 'master'
+          await this.git.init(['-b', branch])
 
-        // Ensure CI and local test environments don't crash if global git user is missing
-        await this.git.addConfig('user.name', 'Storage Bot')
-        await this.git.addConfig('user.email', 'bot@heisenware.local')
+          // Ensure CI and local test environments don't crash if global git user is missing
+          await this.git.addConfig('user.name', 'Storage Bot')
+          await this.git.addConfig('user.email', 'bot@heisenware.local')
 
-        await this._syncGitignore()
+          await this._syncGitignore()
 
-        await this.git.add('.gitignore')
-        await this.git.commit('chore: initialize storage repository')
-      } else {
-        // Existing repository: keep the .gitignore in sync with the currently
-        // configured patterns. This is idempotent and ensures that patterns
-        // added in newer versions (or via options.ignore) also reach
-        // repositories that were initialized before the change.
-        await this._syncGitignore()
-      }
-
-      if (this.options.remote) {
-        const remotes = await this.git.getRemotes()
-        if (!remotes.find(r => r.name === 'origin')) {
-          await this.git.addRemote('origin', this.options.remote)
+          await this.git.add('.gitignore')
+          await this.git.commit('chore: initialize storage repository')
+        } else {
+          // Existing repository: keep the .gitignore in sync with the currently
+          // configured patterns. This is idempotent and ensures that patterns
+          // added in newer versions (or via options.ignore) also reach
+          // repositories that were initialized before the change.
+          await this._syncGitignore()
         }
-      }
+
+        if (this.options.remote) {
+          const remotes = await this.git.getRemotes()
+          if (!remotes.find(r => r.name === 'origin')) {
+            await this.git.addRemote('origin', this.options.remote)
+          }
+        }
+      })
     } catch (err) {
       this.storage._log.error(`Git initialization failed: ${err.message}`)
     }
   }
 
   /**
-   * Writes the .gitignore file, combining the built-in pattern that hides
-   * temporary files of the atomic write queue with any consumer-provided
-   * patterns from `options.ignore`.
+   * Writes the .gitignore file, combining the built-in patterns (temp files
+   * of the atomic write queue, the cross-process lock directories) with any
+   * consumer-provided patterns from `options.ignore`.
    *
    * The operation is idempotent: repeated calls always produce the same file
    * content, so it is safe to run on every startup.
@@ -92,8 +104,13 @@ class GitManager {
    * @returns {Promise<void>}
    */
   async _syncGitignore () {
-    // Ignore temp files generated by the storage queue, plus consumer patterns
-    const patterns = ['*.tmp-*', ...(this.options.ignore || [])]
+    // Built-ins: temp files of the write queue and the lock directories
+    const patterns = [
+      '*.tmp-*',
+      `${OP_LOCK}/`,
+      `${OWNER_LOCK}/`,
+      ...(this.options.ignore || [])
+    ]
     const content = patterns.join('\n') + '\n'
     const gitignorePath = path.join(this.storage._dir, '.gitignore')
 
@@ -139,7 +156,8 @@ class GitManager {
 
   /**
    * Retrieves the current version control status, reduced to the logical
-   * storage keys that were added, modified, or deleted.
+   * storage keys that were added, modified, or deleted. Read-only, hence
+   * not serialized.
    *
    * @returns {Promise<{ branch: string, isClean: boolean, added: string[], modified: string[], deleted: string[] }>}
    */
@@ -161,11 +179,12 @@ class GitManager {
   }
 
   /**
-   * Stages all changes and commits them to the local repository.
-   * If no message is provided, a smart summary is auto-generated.
+   * Stages all changes and commits them to the local repository, serialized
+   * across processes. If no message is provided, a smart summary is
+   * auto-generated.
    *
    * Staging uses `git add .` (instead of a `*.json` glob) so that items
-   * stored in subfolders are versioned as well, and so that a repository
+   * living in subfolders are versioned as well, and so that a repository
    * without any JSON files yet does not fail with a pathspec error on its
    * first commit. Unwanted files are excluded via .gitignore, not via the
    * staging pattern.
@@ -176,32 +195,37 @@ class GitManager {
   async commit (message = null) {
     await this.initPromise // Wait for init to finish!
 
-    await this.git.add('.')
+    return this.storage._withOpLock(async () => {
+      await this.git.add('.')
 
-    const status = await this.git.status()
-    if (status.isClean()) {
-      this.storage._log.warn('Git commit skipped: No changes detected.')
-      return null
-    }
+      const status = await this.git.status()
+      if (status.isClean()) {
+        this.storage._log.warn('Git commit skipped: No changes detected.')
+        return null
+      }
 
-    const commitMsg = message || (await this._generateAutoMessage(status))
-    const result = await this.git.commit(commitMsg)
-    return result.commit
+      const commitMsg = message || (await this._generateAutoMessage(status))
+      const result = await this.git.commit(commitMsg)
+      return result.commit
+    })
   }
 
   /**
    * Creates a new local branch from the current state and switches to it.
+   * Serialized across processes.
    *
    * @param {string} branchName - The name of the new branch.
    * @returns {Promise<void>}
    */
   async createBranch (branchName) {
     await this.initPromise // Wait for init to finish!
-    await this.git.checkoutLocalBranch(branchName)
+    return this.storage._withOpLock(async () => {
+      await this.git.checkoutLocalBranch(branchName)
+    })
   }
 
   /**
-   * Creates a Git tag at the current state.
+   * Creates a Git tag at the current state. Serialized across processes.
    *
    * @param {string} tagName - The name of the tag.
    * @param {string} [message=null] - Optional message to create an annotated tag.
@@ -210,15 +234,17 @@ class GitManager {
   async createTag (tagName, message = null) {
     await this.initPromise // Wait for init to finish!
 
-    if (message) {
-      await this.git.addAnnotatedTag(tagName, message)
-    } else {
-      await this.git.addTag(tagName)
-    }
+    return this.storage._withOpLock(async () => {
+      if (message) {
+        await this.git.addAnnotatedTag(tagName, message)
+      } else {
+        await this.git.addTag(tagName)
+      }
+    })
   }
 
   /**
-   * Lists all tags of the repository.
+   * Lists all tags of the repository. Read-only, hence not serialized.
    *
    * Note: simple-git's `tags()` resolves to a TagResult object; this method
    * unwraps it and returns the plain array of tag names, which is what
@@ -233,15 +259,17 @@ class GitManager {
   }
 
   /**
-   * Deletes a tag from the repository. Only the tag reference is removed;
-   * the underlying commits remain untouched.
+   * Deletes a tag from the repository, serialized across processes. Only
+   * the tag reference is removed; the underlying commits remain untouched.
    *
    * @param {string} tagName - The name of the tag to delete.
    * @returns {Promise<void>}
    */
   async deleteTag (tagName) {
     await this.initPromise
-    await this.git.tag(['-d', tagName])
+    return this.storage._withOpLock(async () => {
+      await this.git.tag(['-d', tagName])
+    })
   }
 
   /**
@@ -257,13 +285,15 @@ class GitManager {
   }
 
   /**
-   * Checks out a branch, tag, or commit while keeping the owning Storage
-   * instance consistent: file watcher events are suppressed via the git lock
-   * during the mass file change, and the in-memory key map is rebuilt from
-   * the new working tree afterwards.
+   * Checks out a branch, tag, or commit while keeping every observing
+   * Storage instance consistent: the operation runs under the cross-process
+   * lock (whose presence pauses the watchers of OTHER processes), this
+   * process's watcher is paused via the git lock, and the in-memory key map
+   * is rebuilt from the new working tree afterwards. Other processes resync
+   * automatically when the lock disappears.
    *
    * Smart Checkout: if the target is a tag or commit (not a branch), the
-   * current branch — or the explicitly provided `targetBranch` — is attached
+   * current branch - or the explicitly provided `targetBranch` - is attached
    * to it, preventing a detached HEAD state.
    *
    * @param {string} branchOrTagName - The target branch, tag, or commit hash.
@@ -273,64 +303,68 @@ class GitManager {
   async checkout (branchOrTagName, targetBranch = null) {
     await this.initPromise
 
-    this.storage._gitLock = true
-    try {
-      if (targetBranch) {
-        // Explicitly requested a new/different branch to be attached to the target
-        await this.git.checkout(['-B', targetBranch, branchOrTagName])
-      } else {
-        const isBranch = await this._isLocalBranch(branchOrTagName)
-
-        if (isBranch) {
-          // It's an existing branch, just switch to it natively
-          await this.git.checkout(branchOrTagName)
+    return this.storage._withOpLock(async () => {
+      this.storage._gitLock = true
+      try {
+        if (targetBranch) {
+          // Explicitly requested a new/different branch to be attached to the target
+          await this.git.checkout(['-B', targetBranch, branchOrTagName])
         } else {
-          // It's a tag or commit. Default to attaching the *current* branch to it!
-          // FIX: Get the current branch directly from git status
-          const status = await this.git.status()
-          const currentBranch = status.current
+          const isBranch = await this._isLocalBranch(branchOrTagName)
 
-          await this.git.checkout(['-B', currentBranch, branchOrTagName])
+          if (isBranch) {
+            // It's an existing branch, just switch to it natively
+            await this.git.checkout(branchOrTagName)
+          } else {
+            // It's a tag or commit. Default to attaching the *current* branch to it!
+            // FIX: Get the current branch directly from git status
+            const status = await this.git.status()
+            const currentBranch = status.current
+
+            await this.git.checkout(['-B', currentBranch, branchOrTagName])
+          }
         }
-      }
 
-      this.storage._keyMap.clear()
-      this.storage._scanDirectorySync(this.storage._dir)
-    } finally {
-      this.storage._gitLock = false
-    }
+        this.storage.resync()
+      } finally {
+        this.storage._gitLock = false
+      }
+    })
   }
 
   /**
    * Pushes local commits of the current branch to the 'origin' remote,
-   * setting the upstream on first push.
+   * setting the upstream on first push. Serialized across processes.
    *
    * @returns {Promise<void>}
    */
   async push () {
     await this.initPromise
-    const status = await this.git.status()
-    await this.git.push('origin', status.current, { '--set-upstream': null })
+    return this.storage._withOpLock(async () => {
+      const status = await this.git.status()
+      await this.git.push('origin', status.current, { '--set-upstream': null })
+    })
   }
 
   /**
    * Pulls remote changes and re-synchronizes the in-memory key map of the
-   * owning Storage instance. Watcher events are suppressed during the
-   * operation via the git lock.
+   * owning Storage instance. Serialized across processes; watcher events
+   * are suppressed during the operation via the git lock.
    *
    * @returns {Promise<void>}
    */
   async pull () {
     await this.initPromise
 
-    this.storage._gitLock = true
-    try {
-      await this.git.pull()
-      this.storage._keyMap.clear()
-      this.storage._scanDirectorySync(this.storage._dir)
-    } finally {
-      this.storage._gitLock = false
-    }
+    return this.storage._withOpLock(async () => {
+      this.storage._gitLock = true
+      try {
+        await this.git.pull()
+        this.storage.resync()
+      } finally {
+        this.storage._gitLock = false
+      }
+    })
   }
 }
 
