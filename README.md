@@ -2,7 +2,7 @@
 
 [![neostandard](https://img.shields.io/badge/code_style-neostandard-brightgreen?style=flat)](https://github.com/neostandard/neostandard)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![CI](https://github.com/heisenware/storage/actions/workflows/ci.yaml/badge.svg)
+[![CI](https://github.com/heisenware/storage/actions/workflows/ci.yml/badge.svg)](https://github.com/heisenware/storage/actions/workflows/ci.yml)
 
 A lightweight, class-based JSON storage module for Node.js that uses the
 filesystem for persisting structured key-value data. Designed for **atomic
