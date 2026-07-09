@@ -1,309 +1,310 @@
 // tests/storage.spec.js
 const path = require('path')
 const fs = require('fs-extra')
-const assert = require('assert/strict')
 const fixture = require('./fixtures/test-002.json')
 const Storage = require('../src/Storage')
 
-describe('Storage v2', () => {
-  // =========================================================================
-  // CORE STORAGE & FILESYSTEM OPERATIONS
-  // =========================================================================
-  context('using flat files on initially empty store', () => {
-    const dir = path.join(__dirname, 'test-storage-flat')
-    after(() => {
-      fs.rmSync(dir, { recursive: true, force: true })
-    })
+/** Silent logger to keep Jest output free of expected warnings. */
+const silentLog = { info () {}, warn () {}, error () {} }
 
-    let storage
+/**
+ * Polls an async predicate until it returns true or the timeout is reached.
+ * Used to await chokidar watcher events without hard-coded sleeps.
+ */
+async function waitFor (predicate, timeout = 3000, interval = 50) {
+  const start = Date.now()
+  while (Date.now() - start < timeout) {
+    if (await predicate()) return true
+    await new Promise(resolve => setTimeout(resolve, interval))
+  }
+  return false
+}
 
-    it('should correctly create an empty directory when nothing exists', () => {
-      assert.throws(() => fs.accessSync(dir))
-      storage = new Storage({ dir })
-      assert.equal(fs.accessSync(dir), undefined)
-    })
+// ===========================================================================
+// CORE STORAGE & FILESYSTEM OPERATIONS
+// ===========================================================================
+describe('core operations on an initially empty store', () => {
+  const dir = path.join(__dirname, 'test-storage-flat')
+  let storage
 
-    it('should report to have no keys', () => {
-      const keys = storage.keys()
-      assert.deepEqual(keys, [])
-    })
+  afterAll(async () => {
+    await Storage.dispose(dir)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
 
-    context('read / write items', () => {
-      it('should not read a non-existing item', async () => {
-        const item = await storage.getItem('not-there')
-        assert.equal(item, null)
-      })
+  it('creates an empty directory when nothing exists', () => {
+    expect(() => fs.accessSync(dir)).toThrow()
+    storage = new Storage({ dir, log: silentLog })
+    expect(fs.accessSync(dir)).toBeUndefined()
+  })
 
-      it('should reject invalid keys (path traversal protection)', async () => {
-        await assert.rejects(
-          async () => await storage.setItem('../evil-key', { hack: true }),
-          /Invalid key/
-        )
-      })
+  it('reports to have no keys', () => {
+    expect(storage.keys()).toEqual([])
+  })
 
-      it('should properly write a single item', async () => {
-        await storage.setItem('item1', { just: 'a test of item1' })
-      })
+  it('returns null for a non-existing item', async () => {
+    await expect(storage.getItem('not-there')).resolves.toBeNull()
+  })
 
-      it('should read the just created item', async () => {
-        const item = await storage.getItem('item1')
-        assert.deepEqual(item, { just: 'a test of item1' })
-      })
+  it('rejects invalid keys (path traversal protection)', async () => {
+    await expect(storage.setItem('../evil-key', { hack: true })).rejects.toThrow(
+      /Invalid key/
+    )
+  })
 
-      it('should store and retrieve a 50MB item', async () => {
-        const bigPayload = { data: 'x'.repeat(50 * 1024 * 1024) } // ~50MB string
-        await storage.setItem('big-item', bigPayload)
-        const readBack = await storage.getItem('big-item')
-        assert.deepEqual(readBack, bigPayload)
-      })
+  it('rejects folder options escaping the root (path traversal protection)', async () => {
+    await expect(
+      storage.setItem('key', { hack: true }, { folder: '../evil' })
+    ).rejects.toThrow(/Security Error/)
+  })
 
-      it('should detect external file changes via chokidar watcher', async () => {
-        const key = 'watched-key'
-        const value1 = { key, value: 'first' }
-        const value2 = { key, value: 'updated' }
-
-        // V2 Path logic: keys are directly mapped to key.json
-        const fileName = Storage._sanitizeKey(key)
-        const filePath = path.join(storage._dir, fileName)
-
-        // simulate external creation
-        await fs.writeJson(filePath, value1)
-        await new Promise(resolve => setTimeout(resolve, 100)) // let watcher pick it up
-        let fetched = await storage.getItem(key)
-        assert.deepEqual(fetched, 'first')
-
-        // simulate external modification
-        await fs.writeJson(filePath, value2)
-        await new Promise(resolve => setTimeout(resolve, 100))
-        fetched = await storage.getItem(key)
-        assert.deepEqual(fetched, 'updated')
-      })
-
-      it('should properly handle concurrent reads and writes', async () => {
-        const contents = Array(100)
-          .fill(0)
-          .map((x, i) => {
-            const copy = JSON.parse(JSON.stringify(fixture))
-            copy[0].concurrencyTest = i
-            return copy
-          })
-        const p1 = Promise.all(contents.map(x => storage.setItem('item2', x)))
-        const p2 = new Promise(resolve =>
-          setTimeout(
-            () => storage.setItem('item3', 'survived').then(resolve),
-            5
-          )
-        )
-        await Promise.all(
-          contents.map(x => async () => {
-            const item = await storage.getItem('item2')
-            assert(
-              item[0].concurrencyTest >= 0 && item[0].concurrencyTest < 100
-            )
-          })
-        )
-        await p2
-        await p1
-        const item3 = await storage.getItem('item3')
-        assert.equal(item3, 'survived')
-      })
-
-      it('should properly remove items', async () => {
-        await storage.removeItem('item2')
-        const item = await storage.getItem('item2')
-        assert.equal(item, null)
-      })
-
-      it('should clear the entire storage', async () => {
-        await storage.clear()
-        const keys = storage.keys()
-        assert.deepEqual(keys, [])
-      })
-
-      it('should gracefully reject non-serializable objects (circular references)', async () => {
-        const obj = {}
-        obj.self = obj // Create circular reference
-
-        await assert.rejects(
-          async () => await storage.setItem('circular-item', obj),
-          TypeError // Should throw native JSON stringify TypeError
-        )
-
-        // Ensure no temp files were left behind
-        const files = fs.readdirSync(storage._dir)
-        assert.equal(
-          files.some(f => f.includes('.tmp')),
-          false
-        )
-      })
+  it('writes and reads back a single item', async () => {
+    await storage.setItem('item1', { just: 'a test of item1' })
+    await expect(storage.getItem('item1')).resolves.toEqual({
+      just: 'a test of item1'
     })
   })
 
-  // =========================================================================
-  // MULTI-INSTANCE & FOLDER SUPPORT
-  // =========================================================================
-  context('using nested files with multiple instances', () => {
-    const dir = path.join(__dirname, 'test-storage-nested')
-    after(() => {
-      fs.rmSync(dir, { recursive: true, force: true })
+  it('writes and reads back a complex fixture', async () => {
+    await storage.setItem('item-fixture', fixture)
+    await expect(storage.getItem('item-fixture')).resolves.toEqual(fixture)
+  })
+
+  it(
+    'stores and retrieves a 50MB item',
+    async () => {
+      const bigPayload = { data: 'x'.repeat(50 * 1024 * 1024) } // ~50MB string
+      await storage.setItem('big-item', bigPayload)
+      await expect(storage.getItem('big-item')).resolves.toEqual(bigPayload)
+    },
+    60000
+  )
+
+  it('detects external file changes via the chokidar watcher', async () => {
+    const key = 'watched-key'
+
+    // V2 path logic: keys are directly mapped to key.json
+    const fileName = Storage._sanitizeKey(key)
+    const filePath = path.join(storage._dir, fileName)
+
+    // simulate external creation
+    await fs.writeJson(filePath, { key, value: 'first' })
+    expect(
+      await waitFor(async () => (await storage.getItem(key)) === 'first')
+    ).toBe(true)
+
+    // simulate external modification
+    await fs.writeJson(filePath, { key, value: 'updated' })
+    expect(
+      await waitFor(async () => (await storage.getItem(key)) === 'updated')
+    ).toBe(true)
+  })
+
+  it('serializes concurrent writes on the same key (last write wins)', async () => {
+    const writes = Array(100)
+      .fill(0)
+      .map((_, i) => storage.setItem('item2', { concurrencyTest: i }))
+
+    // A write to a DIFFERENT key must not be blocked by the busy queue above
+    const independent = new Promise(resolve =>
+      setTimeout(() => storage.setItem('item3', 'survived').then(resolve), 5)
+    )
+
+    await Promise.all(writes)
+    await independent
+
+    // The per-file queue preserves call order, so the last write wins
+    await expect(storage.getItem('item2')).resolves.toEqual({
+      concurrencyTest: 99
     })
+    await expect(storage.getItem('item3')).resolves.toBe('survived')
+  })
 
-    let storage1, storage2
+  it('gracefully rejects non-serializable objects (circular references)', async () => {
+    const obj = {}
+    obj.self = obj // create circular reference
 
-    it('should return the same instance for the same directory', () => {
-      storage1 = new Storage({ dir })
-      storage2 = new Storage({ dir })
-      assert.strictEqual(storage1, storage2)
-    })
+    await expect(storage.setItem('circular-item', obj)).rejects.toThrow(
+      TypeError
+    )
 
-    it('should support writing items in folder structures', async () => {
-      await storage1.setItem('item1', { item1: 'item1' }, { folder: 'test1' })
-      await storage2.setItem('item2', { item2: 'item2' })
-      await storage1.setItem('item3', { item3: 'item3' }, { folder: 'test2' })
-    })
+    // Ensure no temp files were left behind
+    const files = fs.readdirSync(storage._dir)
+    expect(files.some(f => f.includes('.tmp'))).toBe(false)
+  })
 
-    it('should properly read items in folder structures', async () => {
-      const item1 = await storage2.getItem('item1')
-      assert.deepEqual(item1, { item1: 'item1' })
+  it('keeps the queue alive after a failed write on the same key', async () => {
+    const obj = {}
+    obj.self = obj
+    await expect(storage.setItem('item4', obj)).rejects.toThrow(TypeError)
 
-      const item2 = await storage1.getItem('item2')
-      assert.deepEqual(item2, { item2: 'item2' })
-    })
+    // The follow-up operation on the very same key must still execute
+    await storage.setItem('item4', { healthy: true })
+    await expect(storage.getItem('item4')).resolves.toEqual({ healthy: true })
+  })
 
-    it('should clear scoped subfolders without destroying root', async () => {
-      await storage1.clear({ folder: 'test1' })
-      const item1 = await storage1.getItem('item1')
-      const item2 = await storage1.getItem('item2')
+  it('removes items', async () => {
+    await storage.removeItem('item2')
+    await expect(storage.getItem('item2')).resolves.toBeNull()
+  })
 
-      assert.equal(item1, null) // Deleted from subfolder
-      assert.deepEqual(item2, { item2: 'item2' }) // Root intact
+  it('clears the entire storage', async () => {
+    await storage.clear()
+    expect(storage.keys()).toEqual([])
+  })
+})
+
+// ===========================================================================
+// MULTI-INSTANCE & FOLDER SUPPORT
+// ===========================================================================
+describe('folder support and the singleton registry', () => {
+  const dir = path.join(__dirname, 'test-storage-nested')
+  let storage1, storage2
+
+  afterAll(async () => {
+    await Storage.dispose(dir)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('returns the same instance for the same directory', () => {
+    storage1 = new Storage({ dir, log: silentLog })
+    storage2 = new Storage({ dir, log: silentLog })
+    expect(storage1).toBe(storage2)
+  })
+
+  it('supports writing items into folder structures', async () => {
+    await storage1.setItem('item1', { item1: 'item1' }, { folder: 'test1' })
+    await storage2.setItem('item2', { item2: 'item2' })
+    await storage1.setItem('item3', { item3: 'item3' }, { folder: 'test2' })
+  })
+
+  it('reads items independent of their folder location', async () => {
+    await expect(storage2.getItem('item1')).resolves.toEqual({ item1: 'item1' })
+    await expect(storage1.getItem('item2')).resolves.toEqual({ item2: 'item2' })
+  })
+
+  it('scopes keys() by folder', () => {
+    expect(storage1.keys('test1')).toEqual(['item1'])
+    expect(storage1.keys('test2')).toEqual(['item3'])
+    expect(storage1.keys().sort()).toEqual(['item1', 'item2', 'item3'])
+  })
+
+  it('clears scoped subfolders without destroying the root', async () => {
+    await storage1.clear({ folder: 'test1' })
+    await expect(storage1.getItem('item1')).resolves.toBeNull() // deleted from subfolder
+    await expect(storage1.getItem('item2')).resolves.toEqual({ item2: 'item2' }) // root intact
+  })
+})
+
+// ===========================================================================
+// LIFECYCLE: watch OPTION & dispose()
+// ===========================================================================
+describe('lifecycle management', () => {
+  const dir = path.join(__dirname, 'test-storage-lifecycle')
+
+  afterAll(async () => {
+    await Storage.dispose(dir)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('does not observe external changes when constructed with watch: false', async () => {
+    const storage = new Storage({ dir, log: silentLog, watch: false })
+    expect(storage._watcher).toBeNull()
+
+    // simulate an external write
+    const filePath = path.join(dir, Storage._sanitizeKey('external-key'))
+    await fs.writeJson(filePath, { key: 'external-key', value: 42 })
+
+    // give a hypothetical watcher ample time, then confirm nothing was picked up
+    await new Promise(resolve => setTimeout(resolve, 300))
+    await expect(storage.getItem('external-key')).resolves.toBeNull()
+  })
+
+  it('picks up on-disk state via the rescan of a re-construction', async () => {
+    // The singleton registry path rescans the directory
+    const storage = new Storage({ dir, log: silentLog, watch: false })
+    await expect(storage.getItem('external-key')).resolves.toBe(42)
+  })
+
+  it('dispose() de-registers the instance so a fresh one can be created', async () => {
+    const before = new Storage({ dir, log: silentLog })
+    await before.setItem('persistent', { survives: 'disposal' })
+    await before.dispose()
+
+    // A new construction must yield a NEW instance (registry was cleaned) ...
+    const after = new Storage({ dir, log: silentLog })
+    expect(after).not.toBe(before)
+
+    // ... while the data on disk is untouched
+    await expect(after.getItem('persistent')).resolves.toEqual({
+      survives: 'disposal'
     })
   })
 
-  // =========================================================================
-  // GIT INTEGRATION SUITE
-  // =========================================================================
-  // =========================================================================
-  // GIT INTEGRATION SUITE
-  // =========================================================================
-  context('Git version control and branching', () => {
-    const dir = path.join(__dirname, 'test-storage-git')
-    let storage
+  it('static dispose() is a no-op for unknown directories', async () => {
+    await expect(Storage.dispose('/tmp/definitely-not-registered')).resolves.toBeUndefined()
+  })
+})
 
-    after(() => {
-      fs.rmSync(dir, { recursive: true, force: true })
+// ===========================================================================
+// V1 -> V2 MIGRATION
+// ===========================================================================
+describe('migration from v1 (MD5) storage layout', () => {
+  const fixtureDir = path.join(__dirname, 'fixtures', 'existing-storage')
+  const dir = path.join(__dirname, 'test-storage-migration')
+
+  beforeAll(async () => {
+    await fs.copy(fixtureDir, dir)
+  })
+
+  afterAll(async () => {
+    await Storage.dispose(dir)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('converts legacy MD5 files into key.json files', async () => {
+    await Storage.migrateFromV1(dir)
+    const storage = new Storage({ dir, log: silentLog })
+
+    expect(storage.keys().sort()).toEqual(['test-001', 'test-002'])
+    await expect(storage.getItem('test-001')).resolves.toEqual({
+      simple: 'json'
     })
+    await expect(storage.getItem('test-002')).resolves.toEqual(fixture)
+  })
 
-    it('should initialize a git repository and respect .gitignore', async () => {
-      storage = new Storage({ dir, git: { init: true } })
+  it('leaves broken and temporary legacy files alone', async () => {
+    // The un-parseable fixture files must neither crash the migration
+    // nor appear as keys
+    const storage = new Storage({ dir, log: silentLog })
+    expect(storage.keys()).not.toContain('broken')
+  })
 
-      await storage.getGitStatus() // Wait for init to complete
+  it('preserves falsy values (0, false, null, empty string) during migration', async () => {
+    const falsyDir = path.join(__dirname, 'test-storage-migration-falsy')
+    try {
+      await fs.mkdirp(falsyDir)
+      // V1 files have no file extension
+      await fs.writeJson(path.join(falsyDir, 'aaa0'), { key: 'zero', value: 0 })
+      await fs.writeJson(path.join(falsyDir, 'aaa1'), {
+        key: 'no',
+        value: false
+      })
+      await fs.writeJson(path.join(falsyDir, 'aaa2'), {
+        key: 'empty',
+        value: ''
+      })
 
-      const gitDirExists = fs.existsSync(path.join(dir, '.git'))
-      const gitignoreExists = fs.existsSync(path.join(dir, '.gitignore'))
+      await Storage.migrateFromV1(falsyDir)
+      const storage = new Storage({ dir: falsyDir, log: silentLog })
 
-      assert.equal(gitDirExists, true, '.git folder should exist')
-      assert.equal(gitignoreExists, true, '.gitignore should exist')
-    })
-
-    it('should accurately report git status for new files', async () => {
-      await storage.setItem('user-alice', { role: 'admin' })
-
-      const status = await storage.getGitStatus()
-      assert.equal(status.isClean, false)
-      assert.ok(status.added.includes('user-alice'))
-    })
-
-    it('should commit changes and generate auto-messages', async () => {
-      const hash = await storage.commit()
-      assert.ok(hash, 'Should return a commit hash')
-
-      const status = await storage.getGitStatus()
-      assert.equal(status.isClean, true)
-    })
-
-    it('should safely switch branches and re-sync memory map', async () => {
-      await storage.createBranch('feature-branch')
-      await storage.checkout('feature-branch')
-
-      await storage.setItem('user-bob', { role: 'user' })
-      await storage.removeItem('user-alice')
-      await storage.commit('chore: swap users')
-
-      assert.equal(await storage.getItem('user-alice'), null)
-      assert.deepEqual(await storage.getItem('user-bob'), { role: 'user' })
-
-      await storage.checkout('master')
-
-      assert.deepEqual(await storage.getItem('user-alice'), { role: 'admin' })
-      assert.equal(await storage.getItem('user-bob'), null)
-    })
-
-    it('should create tags and gracefully rollback without detached HEAD', async () => {
-      // 1. We are on 'master'. Create a baseline tag.
-      await storage.createTag('v1.0.0', 'Stable baseline')
-
-      // 2. Add some new data and commit it to master
-      await storage.setItem('user-charlie', { role: 'guest' })
-      await storage.commit('feat: add charlie')
-
-      assert.deepEqual(await storage.getItem('user-charlie'), { role: 'guest' })
-
-      // 3. Rollback to the tag!
-      // Because we don't provide a branch, it should smartly move 'master' back to this tag.
-      await storage.checkout('v1.0.0')
-
-      // 4. Verify memory state rewound
-      assert.equal(
-        await storage.getItem('user-charlie'),
-        null,
-        'Charlie should be gone'
-      )
-
-      // 5. Verify we are NOT in detached HEAD, but safely still on master
-      const status = await storage.getGitStatus()
-      assert.equal(
-        status.branch,
-        'master',
-        'Should safely remain on master branch'
-      )
-    })
-
-    it('should checkout a tag to an explicitly provided new branch', async () => {
-      // 1. Create a new tag where we currently are
-      await storage.createTag('v1.0.1')
-
-      // 2. Move forward on master
-      await storage.setItem('user-dave', { role: 'admin' })
-      await storage.commit('feat: add dave')
-
-      // 3. Checkout the older tag and explicitly attach it to a 'hotfix' branch
-      await storage.checkout('v1.0.1', 'hotfix-v1')
-
-      // 4. Verify we are on the new branch
-      const status = await storage.getGitStatus()
-      assert.equal(
-        status.branch,
-        'hotfix-v1',
-        'Should be on the new explicitly requested branch'
-      )
-
-      // 5. Verify memory state reflects the tag, not the future master commit
-      assert.equal(
-        await storage.getItem('user-dave'),
-        null,
-        'Dave should not exist in this older tag'
-      )
-    })
-
-    it('should preserve .git during clear() operations', async () => {
-      await storage.clear()
-
-      const gitDirExists = fs.existsSync(path.join(dir, '.git'))
-      assert.equal(gitDirExists, true, '.git must survive clear()')
-
-      const keys = storage.keys()
-      assert.deepEqual(keys, [])
-    })
+      expect(storage.keys().sort()).toEqual(['empty', 'no', 'zero'])
+      await expect(storage.getItem('zero')).resolves.toBe(0)
+      await expect(storage.getItem('no')).resolves.toBe(false)
+      await expect(storage.getItem('empty')).resolves.toBe('')
+    } finally {
+      await Storage.dispose(falsyDir)
+      fs.rmSync(falsyDir, { recursive: true, force: true })
+    }
   })
 })

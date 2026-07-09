@@ -1,0 +1,16 @@
+{
+  // Let ESLint (neostandard) own formatting for JavaScript
+  "[javascript]": {
+    "editor.defaultFormatter": "dbaeumer.vscode-eslint"
+  },
+  "eslint.format.enable": true,
+  // Auto-fix all fixable ESLint problems on save
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+  // Use the flat config (eslint.config.js)
+  "eslint.useFlatConfig": true,
+  // Make sure no other formatter fights with ESLint
+  "editor.formatOnSave": true,
+  "prettier.enable": false
+}

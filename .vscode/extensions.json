@@ -1,0 +1,10 @@
+{
+  // Contributors opening the repo get prompted to install these
+  "recommendations": [
+    "dbaeumer.vscode-eslint"
+  ],
+  // Formatting is owned by ESLint here, so discourage Prettier taking over
+  "unwantedRecommendations": [
+    "esbenp.prettier-vscode"
+  ]
+}

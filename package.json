@@ -4,7 +4,14 @@
   "description": "Efficient and robust JSON file storage",
   "main": "index.js",
   "scripts": {
-    "test": "./node_modules/.bin/mocha tests/**/*.js --exit"
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.js": "eslint --fix"
   },
   "repository": {
     "type": "git",
@@ -22,7 +29,11 @@
     "simple-git": "^3.36.0"
   },
   "devDependencies": {
-    "mocha": "^10.2.0",
-    "sinon": "^15.1.0"
+    "eslint": "^9.39.4",
+    "globals": "^17.7.0",
+    "husky": "^9.1.7",
+    "jest": "^30.4.2",
+    "lint-staged": "^15.5.2",
+    "neostandard": "^0.12.2"
   }
 }
