@@ -273,6 +273,26 @@ class GitManager {
   }
 
   /**
+   * Renames a tag, serialized across processes. The tag's target commit is
+   * unchanged; only the reference name is replaced.
+   *
+   * @param {string} oldName - The name of the existing tag.
+   * @param {string} newName - The new name for the tag.
+   * @returns {Promise<void>}
+   */
+  async renameTag (oldName, newName) {
+    await this.initPromise
+    return this.storage._withOpLock(async () => {
+      // Git has no native rename: re-point the new name at the old tag's
+      // target (annotated tag objects stay dereferenceable), then drop the
+      // old reference. Creation fails first on invalid input, so the old
+      // tag is never deleted without its replacement existing.
+      await this.git.tag([newName, oldName])
+      await this.git.tag(['-d', oldName])
+    })
+  }
+
+  /**
    * Checks whether the given name refers to an existing local branch.
    *
    * @private

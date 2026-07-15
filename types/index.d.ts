@@ -99,6 +99,9 @@ declare class Storage {
   /** Removes a tag while keeping the commit history. */
   deleteTag (tagName: string): Promise<void>
 
+  /** Renames a tag while keeping its target commit. */
+  renameTag (oldTagName: string, newTagName: string): Promise<void>
+
   /** Pushes local commits to 'origin', setting the upstream on first push. */
   push (): Promise<void>
 

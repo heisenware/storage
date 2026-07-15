@@ -138,6 +138,29 @@ describe('Git version control and branching', () => {
     expect(tags).toContain('v1.0.1')
   })
 
+  it('renames tags while keeping their target commit', async () => {
+    const targetBefore = await storage._gitManager.git.revparse(['v1.0.1^{}'])
+
+    await storage.renameTag('v1.0.1', 'v1.0.1-stable')
+
+    const tags = await storage.listTags()
+    expect(tags).not.toContain('v1.0.1')
+    expect(tags).toContain('v1.0.1-stable')
+
+    const targetAfter = await storage._gitManager.git.revparse([
+      'v1.0.1-stable^{}'
+    ])
+    expect(targetAfter).toBe(targetBefore)
+  })
+
+  it('rejects renaming a tag that does not exist', async () => {
+    await expect(storage.renameTag('nope', 'still-nope')).rejects.toThrow()
+
+    // The bogus target name must not have been created
+    const tags = await storage.listTags()
+    expect(tags).not.toContain('still-nope')
+  })
+
   it('preserves .git during clear() operations', async () => {
     await storage.clear()
 

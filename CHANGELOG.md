@@ -39,8 +39,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
     prevent race conditions. Smart checkout attaches the current (or an
     explicitly provided) branch when targeting tags or commits, preventing
     detached HEAD states.
-  - `createTag(name, [message])`, `listTags()` & `deleteTag(name)`: Tag-based
-    snapshotting and version histories as plain string arrays.
+  - `createTag(name, [message])`, `listTags()`, `renameTag(oldName, newName)`
+    & `deleteTag(name)`: Tag-based snapshotting and version histories as plain
+    string arrays.
   - `push()` & `pull()`: Synchronize state across distributed systems.
   - `dispose()` & static `Storage.dispose(dir)`: Graceful instance shutdown —
     closes watchers, awaits in-flight writes, and de-registers from the

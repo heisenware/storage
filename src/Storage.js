@@ -538,6 +538,19 @@ class Storage {
   }
 
   /**
+   * Renames a Git tag. Serialized across processes. The tag's target commit
+   * is unchanged; only the reference name is replaced.
+   *
+   * @param {string} oldTagName - The name of the existing tag.
+   * @param {string} newTagName - The new name for the tag.
+   * @returns {Promise<void>}
+   */
+  async renameTag (oldTagName, newTagName) {
+    if (!this._gitManager) throw new Error('Git integration is not enabled.')
+    return this._gitManager.renameTag(oldTagName, newTagName)
+  }
+
+  /**
    * Pushes local commits to the configured remote repository (origin).
    * Serialized across processes.
    *

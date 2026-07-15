@@ -88,7 +88,8 @@ await storage.checkout('v1.0.0', 'hotfix-v1')
 
 // Inspect and clean up the version history
 const tags = await storage.listTags() // ['v1.0.0', ...]
-await storage.deleteTag('v1.0.0') // removes the tag, keeps the history
+await storage.renameTag('v1.0.0', 'v1.0.0-legacy') // same commit, new name
+await storage.deleteTag('v1.0.0-legacy') // removes the tag, keeps the history
 ```
 
 ---
@@ -182,6 +183,8 @@ calls return the existing instance with a rescanned key map.
   message is given).
 - `listTags()`: Returns all tag names as a plain string array.
 - `deleteTag(name)`: Removes a tag while keeping the commit history.
+- `renameTag(oldName, newName)`: Renames a tag; the target commit is
+  unchanged.
 - `push()` / `pull()`: Synchronizes with remote Git endpoints.
 
 ### Lifecycle
