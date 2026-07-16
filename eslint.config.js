@@ -7,8 +7,10 @@ const globals = require('globals')
 
 module.exports = [
   ...neostandard({
-    // Reuse the repository's .gitignore (node_modules, coverage, etc.)
-    ignores: neostandard.resolveIgnoresFromGitignore()
+    // Reuse the repository's .gitignore (node_modules, coverage, etc.).
+    // src/vendor holds patched third-party code that keeps its upstream
+    // style (semicolons, 4-space indent) for diffability.
+    ignores: [...neostandard.resolveIgnoresFromGitignore(), 'src/vendor/**']
   }),
   {
     // Declare the Jest globals (describe, it, expect, ...) for test files,

@@ -1,10 +1,12 @@
 // src/Storage.js
 const fs = require('fs/promises')
 const path = require('path')
-const { emptyDir } = require('fs-extra')
 const fsSync = require('fs')
 const chokidar = require('chokidar')
-const lockfile = require('proper-lockfile')
+// Vendored & patched copy - fixes an uncaught async crash in the lock
+// keepalive (release race) and a registry collision between the operation
+// and ownership locks. See src/vendor/proper-lockfile/lib/lockfile.js.
+const lockfile = require('./vendor/proper-lockfile')
 const GitManager = require('./GitManager')
 const { TMP_MARKER, OP_LOCK, OWNER_LOCK } = require('./constants')
 
@@ -367,8 +369,16 @@ class Storage {
           }
         }
       } else {
-        // Clearing a subfolder is safe, as .git only lives at the root
-        await emptyDir(targetDir)
+        // Clearing a subfolder is safe, as .git only lives at the root.
+        // Empty it in place: create it if missing, keep the directory
+        // itself (recreating it would churn the watchers)
+        await fs.mkdir(targetDir, { recursive: true })
+        const entries = await fs.readdir(targetDir)
+        await Promise.all(
+          entries.map(entry =>
+            fs.rm(path.join(targetDir, entry), { recursive: true, force: true })
+          )
+        )
       }
 
       // Clean up the memory map

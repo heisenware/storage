@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] - 16 Jul 2026
+
+### Fixed
+
+- **Uncaught async crash from the lock keepalive (release race):**
+  `proper-lockfile`'s keepalive timer could crash the host process seconds
+  after storage operations completed - its in-flight `fs.stat` callback was
+  not guarded against the lock having been released, ending in an uncaught
+  `TypeError` (registry re-entry) or a spurious `ECOMPROMISED`. The library
+  is now vendored (`src/vendor/proper-lockfile`, MIT, patched and
+  documented) with released-lock guards on all keepalive paths.
+- **Operation/ownership lock registry collision:** `proper-lockfile` keys
+  its internal registry by the locked file, not the lockfile path, so the
+  per-operation lock and the `exclusive` ownership lock (both on the
+  storage root) clobbered each other: releasing an operation lock killed
+  the ownership keepalive (staleness after 15s silently voided
+  exclusivity, and `dispose()` left the ownership lockfile behind) and
+  crashed its next cycle. The vendored copy keys the registry by lockfile
+  path, making the two locks fully independent.
+
+### Changed
+
+- Dependency `proper-lockfile` replaced by the patched vendored copy; its
+  runtime dependencies (`graceful-fs`, `retry`, `signal-exit`) are now
+  direct dependencies.
+- `fs-extra` is no longer a runtime dependency: its single production use
+  (`emptyDir` in subfolder `clear()`) was replaced with native `fs`. It
+  remains a devDependency for the test suite.
+
 ## [3.0.0] - 16 Jul 2026
 
 ### Breaking Changes

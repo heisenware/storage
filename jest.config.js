@@ -7,7 +7,10 @@ module.exports = {
   // Git operations and the big-payload test need headroom
   testTimeout: 30000,
 
-  collectCoverageFrom: ['src/**/*.js'],
+  // src/vendor is patched third-party code with many branches this library
+  // never exercises (sync API, custom fs adapters) - keep it out of the
+  // coverage thresholds
+  collectCoverageFrom: ['src/**/*.js', '!src/vendor/**'],
   coverageDirectory: 'coverage',
 
   // Filesystem-watcher teardown (chokidar close()) can outlive a worker's

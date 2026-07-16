@@ -2,7 +2,7 @@
 const path = require('path')
 const fs = require('fs-extra')
 const { spawnSync } = require('child_process')
-const lockfile = require('proper-lockfile')
+const lockfile = require('../src/vendor/proper-lockfile')
 const Storage = require('../src/Storage')
 const { OP_LOCK } = require('../src/constants')
 
