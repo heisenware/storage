@@ -250,6 +250,10 @@ class Storage {
    * enqueued synchronously; directory creation and serialization happen
    * inside the queued task.
    *
+   * Writing an existing key with a different `folder` is an atomic
+   * relocation: the superseded file is removed, so a key never exists
+   * twice on disk.
+   *
    * @param {string} key - The identifier to store. Must be alphanumeric (plus _ and -).
    * @param {*} value - JSON-serializable value to store.
    * @param {Object} [options]
@@ -262,9 +266,20 @@ class Storage {
     const filePath = path.join(dirPath, fileName)
     const content = { key, value }
 
+    // Relocate-on-write: if the key already lives at a different path
+    // (its folder changed), the old file must go - otherwise the key
+    // exists twice on disk and the next rescan picks a winner by scan
+    // order. Capture the path before the key map is updated.
+    const previousPath = this._keyMap.get(key)
+
     this._modifiedByUs.add(filePath)
     await this._writeFile(filePath, content, dirPath)
     this._keyMap.set(key, filePath)
+
+    if (previousPath && previousPath !== filePath) {
+      this._modifiedByUs.add(previousPath)
+      await this._deleteFile(previousPath)
+    }
   }
 
   /**

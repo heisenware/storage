@@ -29,7 +29,8 @@ declare class Storage {
 
   /**
    * Persists a key-value pair. Writes to the same key apply strictly in
-   * call order - the last caller wins.
+   * call order - the last caller wins. Writing an existing key with a
+   * different folder relocates it (the superseded file is removed).
    */
   setItem (
     key: string,

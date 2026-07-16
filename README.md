@@ -118,6 +118,9 @@ await storage.setItem('session-42', { token: 'abc' }, { folder: 'sessions' })
 const keys = storage.keys('sessions') // ['session-42'] (synchronous!)
 ```
 
+Writing an existing key with a different `folder` _moves_ it: the previous
+file is removed atomically, so a key never exists twice on disk.
+
 ---
 
 ## Keeping Runtime Data Out of Version Control

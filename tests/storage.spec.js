@@ -196,6 +196,31 @@ describe('folder support and the singleton registry', () => {
     await expect(storage1.getItem('item1')).resolves.toBeNull() // deleted from subfolder
     await expect(storage1.getItem('item2')).resolves.toEqual({ item2: 'item2' }) // root intact
   })
+
+  it('relocates a key when its folder changes (no duplicate files)', async () => {
+    // Counts files named <key>.json anywhere below the storage root
+    const filesFor = key =>
+      fs
+        .readdirSync(dir, { recursive: true })
+        .filter(f => path.basename(f.toString()) === `${key}.json`)
+
+    // root -> folder
+    await storage1.setItem('mover', { rev: 1 })
+    await storage1.setItem('mover', { rev: 2 }, { folder: 'depot-a' })
+
+    expect(filesFor('mover')).toEqual([path.join('depot-a', 'mover.json')])
+
+    // A rescan must agree - previously the winner was decided by scan order
+    storage1.resync()
+    await expect(storage1.getItem('mover')).resolves.toEqual({ rev: 2 })
+
+    // folder -> folder leaves no orphan behind either
+    await storage1.setItem('mover', { rev: 3 }, { folder: 'depot-b' })
+
+    expect(filesFor('mover')).toEqual([path.join('depot-b', 'mover.json')])
+    storage1.resync()
+    await expect(storage1.getItem('mover')).resolves.toEqual({ rev: 3 })
+  })
 })
 
 // ===========================================================================

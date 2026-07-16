@@ -59,6 +59,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Fixed
 
+- **`setItem` relocates on folder change:** writing an existing key with a
+  different `folder` now removes the superseded file. Previously the key
+  existed twice on disk and the next rescan (`resync()`/reopen) picked a
+  winner by directory scan order — silently.
 - `push()` and `pull()` without a configured `origin` now fail with a clear
   `GIT_NO_REMOTE` error instead of a cryptic git message.
 - A failed Git initialization (previously only logged) is now recorded and
