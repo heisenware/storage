@@ -57,7 +57,9 @@ class Storage {
    * @param {string} options.dir - Absolute path to the storage directory.
    * @param {Object} [options.log=console] - Optional logger object.
    * @param {Object} [options.git={}] - Git integration options
-   *   (e.g., `{ init: true, remote, branch, ignore: [] }`).
+   *   (e.g., `{ init: true, remote, branch, ignore: [], auth: { token },
+   *   strategy: 'local-wins', autoSync: { interval } }`).
+   *   See {@link GitManager} for the full option reference.
    * @param {boolean} [options.watch=true] - Whether to run a filesystem
    *   watcher keeping the key map in sync with external changes. Set to
    *   `false` for write-only targets (e.g., deployment directories).
@@ -266,12 +268,33 @@ class Storage {
   }
 
   /**
-   * Retrieves a stored item from the filesystem.
+   * Retrieves a stored item from the filesystem. With the `version` option
+   * the item is read as it existed at a given tag or commit - a pure
+   * time-travel read that never touches the current state (requires Git
+   * integration).
    *
    * @param {string} key - The key to retrieve.
+   * @param {Object} [options]
+   * @param {string} [options.version] - Optional tag or commit to read from.
    * @returns {Promise<*>} The stored value or null if not found.
    */
-  async getItem (key) {
+  async getItem (key, { version } = {}) {
+    if (version) {
+      if (!this._gitManager) {
+        throw new Error(
+          'Git integration is not enabled for this Storage instance.'
+        )
+      }
+      const item = await this._gitManager.readItemAt(version, key)
+      if (!item) {
+        this._log.warn(
+          `Could not find item with key: ${key} at version: ${version}`
+        )
+        return null
+      }
+      return item?.value ?? null
+    }
+
     const filePath = this._keyMap.get(key)
     if (!filePath) {
       this._log.warn(`Could not find item with key: ${key}`)
@@ -379,6 +402,9 @@ class Storage {
    */
   async dispose () {
     this._disposed = true
+    // Stop the git auto-sync loop and drain an in-flight cycle before
+    // tearing anything else down
+    if (this._gitManager) await this._gitManager.dispose()
     // Stop any foreign-lock verification poll
     if (this._foreignLockPoll) {
       clearInterval(this._foreignLockPoll)
@@ -472,32 +498,54 @@ class Storage {
   }
 
   /**
-   * Creates a new Git branch from the current state and switches to it.
+   * Creates a new Git branch and switches to it. By default the branch
+   * starts at the current state; pass `{ at }` to start it at a previous
+   * version (tag or commit) instead - the sync-safe way to work with an
+   * old version on the side, since the current branch is never rewound.
    * Serialized across processes.
    *
    * @param {string} branchName - The name of the new branch.
+   * @param {Object} [options]
+   * @param {string} [options.at] - Optional tag or commit the branch starts at.
    * @returns {Promise<void>}
    */
-  async createBranch (branchName) {
+  async createBranch (branchName, options) {
     if (!this._gitManager) throw new Error('Git integration is not enabled.')
-    return this._gitManager.createBranch(branchName)
+    return this._gitManager.createBranch(branchName, options)
   }
 
   /**
-   * Checks out an existing Git branch, tag, or commit. Safely locks file
-   * watchers (in THIS and all other processes), updates the filesystem, and
-   * re-syncs the in-memory key map.
-   * Smart Checkout: If the target is a tag or commit, this method
-   * automatically attaches the current branch to it, preventing a detached
-   * HEAD state.
+   * Switches to an existing Git branch. Safely locks file watchers (in
+   * THIS and all other processes), updates the filesystem, and re-syncs
+   * the in-memory key map.
    *
-   * @param {string} branchOrTagName - The target branch, tag, or commit hash.
-   * @param {string} [targetBranch] - Optional. Explicitly provide a different branch name to attach to the target.
+   * Tags and commits are not valid checkout targets - use {@link restore}
+   * to re-establish a previous version, or `getItem(key, { version })` to
+   * read one without changing state.
+   *
+   * @param {string} branchName - The branch to switch to.
    * @returns {Promise<void>}
    */
-  async checkout (branchOrTagName, targetBranch) {
+  async checkout (branchName) {
     if (!this._gitManager) throw new Error('Git integration is not enabled.')
-    return this._gitManager.checkout(branchOrTagName, targetBranch)
+    return this._gitManager.checkout(branchName)
+  }
+
+  /**
+   * Re-establishes the data state of a previous version (tag or commit) as
+   * a new forward commit - no history rewrite, so the restored state syncs
+   * to remotes and other processes like any ordinary change. Uncommitted
+   * changes are snapshotted first; the in-between versions remain in the
+   * history and can themselves be restored again.
+   *
+   * @param {string} tagOrCommit - The version to restore (tag name or commit hash).
+   * @param {string} [message] - Optional message for the restore commit.
+   * @returns {Promise<string|null>} The restore commit hash, or null when the
+   *   current state already equals the requested version.
+   */
+  async restore (tagOrCommit, message) {
+    if (!this._gitManager) throw new Error('Git integration is not enabled.')
+    return this._gitManager.restore(tagOrCommit, message)
   }
 
   /**
@@ -566,11 +614,21 @@ class Storage {
    * Safely updates the underlying filesystem and synchronizes memory maps.
    * Serialized across processes.
    *
+   * When local and remote history diverged, the strategy decides:
+   * 'local-wins' (default) merges both sides and resolves conflicting keys
+   * in favor of local content, 'remote-wins' resets to the remote state,
+   * 'fail' throws a {@link Storage.GitSyncError} with code 'GIT_DIVERGED'
+   * without touching local state. A fresh storage without versioned data
+   * adopts an established remote outright.
+   *
+   * @param {Object} [options]
+   * @param {'local-wins'|'remote-wins'|'fail'} [options.strategy] - Divergence
+   *   strategy; defaults to the `git.strategy` option, then 'local-wins'.
    * @returns {Promise<void>}
    */
-  async pull () {
+  async pull (options) {
     if (!this._gitManager) throw new Error('Git integration is not enabled.')
-    return this._gitManager.pull()
+    return this._gitManager.pull(options)
   }
 
   // =========================================================================
@@ -1009,5 +1067,12 @@ class Storage {
     await walk(storageDir)
   }
 }
+
+/**
+ * Typed error thrown by remote sync operations (push/pull); carries a
+ * stable `code`: 'GIT_DIVERGED' or 'GIT_NO_REMOTE'.
+ * @type {typeof import('./GitManager').GitSyncError}
+ */
+Storage.GitSyncError = GitManager.GitSyncError
 
 module.exports = Storage

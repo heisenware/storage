@@ -82,7 +82,7 @@ describe('Git version control and branching', () => {
     await expect(storage.getItem('user-bob')).resolves.toBeNull()
   })
 
-  it('creates tags and gracefully rolls back without detached HEAD', async () => {
+  it('restores a tagged version as a new forward commit', async () => {
     // 1. We are on 'master'. Create a baseline tag.
     await storage.createTag('v1.0.0', 'Stable baseline')
 
@@ -94,35 +94,94 @@ describe('Git version control and branching', () => {
       role: 'guest'
     })
 
-    // 3. Rollback to the tag! Because we don't provide a branch, it should
-    //    smartly move 'master' back to this tag.
-    await storage.checkout('v1.0.0')
+    // 3. Re-establish the tagged version - the state rolls FORWARD to the
+    //    old content, the branch pointer is never rewound
+    const hash = await storage.restore('v1.0.0')
+    expect(hash).toBeTruthy()
 
-    // 4. Verify the memory state rewound
+    // 4. The data state equals the tag ...
     await expect(storage.getItem('user-charlie')).resolves.toBeNull()
 
-    // 5. Verify we are NOT in detached HEAD, but safely still on master
+    // 5. ... while history kept moving forward on the same branch: the
+    //    restore commit sits on top and the in-between commit is preserved
     const status = await storage.getGitStatus()
     expect(status.branch).toBe('master')
+    expect(status.isClean).toBe(true)
+    const log = await storage._gitManager.git.log()
+    expect(log.latest.message).toMatch(/restore: state of 'v1.0.0'/)
+    expect(log.all.some(c => c.message.includes('add charlie'))).toBe(true)
   })
 
-  it('checks out a tag onto an explicitly provided new branch', async () => {
-    // 1. Create a new tag where we currently are
+  it('returns null when restoring a version that matches the current state', async () => {
+    await expect(storage.restore('v1.0.0')).resolves.toBeNull()
+  })
+
+  it('snapshots uncommitted changes before restoring', async () => {
+    await storage.setItem('user-dave', { role: 'temp' })
+
+    await storage.restore('v1.0.0')
+
+    // The restored state does not contain dave ...
+    await expect(storage.getItem('user-dave')).resolves.toBeNull()
+    // ... but the pre-restore snapshot preserved him in the history
+    const log = await storage._gitManager.git.log()
+    expect(
+      log.all.some(c => c.message.includes('snapshot before restoring'))
+    ).toBe(true)
+  })
+
+  it('reads items from previous versions without touching the state', async () => {
+    await storage.setItem('user-eve', { role: 'v1' })
+    await storage.commit('feat: eve v1')
     await storage.createTag('v1.0.1')
 
-    // 2. Move forward on master
-    await storage.setItem('user-dave', { role: 'admin' })
-    await storage.commit('feat: add dave')
+    await storage.setItem('user-eve', { role: 'v2' })
+    await storage.commit('feat: eve v2')
 
-    // 3. Checkout the older tag and explicitly attach it to a 'hotfix' branch
-    await storage.checkout('v1.0.1', 'hotfix-v1')
+    const headBefore = await storage._gitManager.git.revparse(['HEAD'])
 
-    // 4. Verify we are on the new branch
+    // Time-travel read vs. current read
+    await expect(
+      storage.getItem('user-eve', { version: 'v1.0.1' })
+    ).resolves.toEqual({ role: 'v1' })
+    await expect(storage.getItem('user-eve')).resolves.toEqual({ role: 'v2' })
+
+    // Missing keys behave like getItem() does today: null, no throw
+    await expect(
+      storage.getItem('user-nobody', { version: 'v1.0.1' })
+    ).resolves.toBeNull()
+
+    // Nothing moved
+    const headAfter = await storage._gitManager.git.revparse(['HEAD'])
+    expect(headAfter).toBe(headBefore)
+  })
+
+  it('rejects checking out tags or restoring unknown versions', async () => {
+    await expect(storage.checkout('v1.0.1')).rejects.toThrow(
+      /existing branches only/
+    )
+    await expect(storage.restore('no-such-version')).rejects.toThrow(
+      /Unknown tag or commit/
+    )
+  })
+
+  it('creates a branch off a previous version', async () => {
+    // v1.0.1 froze eve at role v1; master has moved on to v2
+    await storage.createBranch('hotfix-v1', { at: 'v1.0.1' })
+
     const status = await storage.getGitStatus()
     expect(status.branch).toBe('hotfix-v1')
+    await expect(storage.getItem('user-eve')).resolves.toEqual({ role: 'v1' })
 
-    // 5. Verify the memory state reflects the tag, not the future master commit
-    await expect(storage.getItem('user-dave')).resolves.toBeNull()
+    // The main line is untouched by the excursion
+    await storage.checkout('master')
+    await expect(storage.getItem('user-eve')).resolves.toEqual({ role: 'v2' })
+  })
+
+  it('rejects branching off an unknown version', async () => {
+    await expect(
+      storage.createBranch('doomed', { at: 'no-such-version' })
+    ).rejects.toThrow(/Unknown tag or commit/)
   })
 
   it('lists all created tags as a plain string array', async () => {

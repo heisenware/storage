@@ -37,8 +37,12 @@ declare class Storage {
     options?: Storage.FolderOptions
   ): Promise<void>
 
-  /** Retrieves a stored value, or null if the key does not exist. */
-  getItem (key: string): Promise<any>
+  /**
+   * Retrieves a stored value, or null if the key does not exist. With
+   * { version } the value is read as it existed at a tag or commit,
+   * without changing any state (requires Git integration).
+   */
+  getItem (key: string, options?: Storage.VersionOptions): Promise<any>
 
   /** Checks whether a key exists (distinguishes "missing" from stored null). */
   has (key: string): boolean
@@ -81,14 +85,27 @@ declare class Storage {
    */
   commit (message?: string): Promise<string | null>
 
-  /** Creates a new branch from the current state and switches to it. */
-  createBranch (branchName: string): Promise<void>
+  /**
+   * Creates a new branch and switches to it. With { at } the branch starts
+   * at a previous version (tag or commit) instead of the current state.
+   */
+  createBranch (
+    branchName: string,
+    options?: Storage.CreateBranchOptions
+  ): Promise<void>
 
   /**
-   * Checks out a branch, tag, or commit and resyncs memory. Tags/commits
-   * are attached to the current (or provided) branch - no detached HEAD.
+   * Switches to an existing branch and resyncs memory. Tags/commits are
+   * not valid targets - use restore() to re-establish a previous version.
    */
-  checkout (branchOrTagName: string, targetBranch?: string): Promise<void>
+  checkout (branchName: string): Promise<void>
+
+  /**
+   * Re-establishes the data state of a tag or commit as a new forward
+   * commit (no history rewrite - safe with remotes and auto-sync).
+   * Returns the commit hash, or null when the state already matches.
+   */
+  restore (tagOrCommit: string, message?: string): Promise<string | null>
 
   /** Tags the current state (annotated when a message is given). */
   createTag (tagName: string, message?: string): Promise<void>
@@ -102,14 +119,64 @@ declare class Storage {
   /** Renames a tag while keeping its target commit. */
   renameTag (oldTagName: string, newTagName: string): Promise<void>
 
-  /** Pushes local commits to 'origin', setting the upstream on first push. */
+  /**
+   * Pushes local commits to 'origin', setting the upstream on first push.
+   * Throws GitSyncError ('GIT_NO_REMOTE') when no origin is configured.
+   */
   push (): Promise<void>
 
-  /** Pulls remote changes and resyncs the in-memory key map. */
-  pull (): Promise<void>
+  /**
+   * Pulls remote changes and resyncs the in-memory key map. On diverged
+   * histories the strategy decides: 'local-wins' (default) merges both
+   * sides and resolves conflicting keys in favor of local content,
+   * 'remote-wins' resets to the remote state, 'fail' throws GitSyncError
+   * ('GIT_DIVERGED') without touching local state. A fresh storage without
+   * versioned data adopts an established remote outright.
+   */
+  pull (options?: Storage.PullOptions): Promise<void>
 }
 
 declare namespace Storage {
+  /**
+   * Typed error thrown by remote sync operations (push/pull). The stable
+   * `code` allows programmatic handling.
+   */
+  class GitSyncError extends Error {
+    code: 'GIT_DIVERGED' | 'GIT_NO_REMOTE'
+  }
+
+  /** Divergence strategy applied by pull() when local and remote history diverged. */
+  type PullStrategy = 'local-wins' | 'remote-wins' | 'fail'
+
+  /** HTTP(S) authentication for remote operations. Requires git >= 2.31. */
+  interface GitAuthOptions {
+    /**
+     * Access token (PAT / OAuth). Injected per command via the child-process
+     * environment - never written to .git/config, argv, or any file.
+     */
+    token: string
+    /**
+     * HTTP username sent with the token. Default: 'oauth2' (works for GitHub
+     * and GitLab tokens); use 'x-access-token' for GitHub App tokens or
+     * 'x-token-auth' for Bitbucket.
+     */
+    username?: string
+  }
+
+  /** Configuration of the periodic commit -> pull -> push loop. */
+  interface AutoSyncOptions {
+    /** Milliseconds between cycles. Default: 30000, minimum: 1000. */
+    interval?: number
+    /** Pull strategy for auto-sync cycles. Defaults to git.strategy, then 'local-wins'. */
+    strategy?: PullStrategy
+  }
+
+  /** Options accepted by pull(). */
+  interface PullOptions {
+    /** Divergence strategy; defaults to git.strategy, then 'local-wins'. */
+    strategy?: PullStrategy
+  }
+
   /** Git integration options, bound at first open() of a directory. */
   interface GitOptions {
     /** Initialize a repository if none exists yet. */
@@ -120,6 +187,12 @@ declare namespace Storage {
     branch?: string
     /** Additional .gitignore patterns, synced idempotently on every startup. */
     ignore?: string[]
+    /** HTTP(S) authentication for push/pull against the remote. */
+    auth?: GitAuthOptions
+    /** Default divergence strategy for pull(). Default: 'local-wins'. */
+    strategy?: PullStrategy
+    /** Enables periodic automatic commit -> pull -> push synchronization. */
+    autoSync?: AutoSyncOptions
   }
 
   /** Minimal logger contract accepted by the library. */
@@ -161,6 +234,18 @@ declare namespace Storage {
   /** Options for folder-scoped data operations. */
   interface FolderOptions {
     folder?: string
+  }
+
+  /** Options for version-scoped reads. */
+  interface VersionOptions {
+    /** Tag name or commit hash to read from. */
+    version?: string
+  }
+
+  /** Options for createBranch(). */
+  interface CreateBranchOptions {
+    /** Tag or commit the new branch starts at. Default: the current state. */
+    at?: string
   }
 }
 

@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 16 Jul 2026
+
+### Breaking Changes
+
+- **`pull()` divergence handling:** `pull()` no longer runs a bare `git pull`
+  (which could leave conflict markers inside `.json` files). When the local
+  branch is merely behind, it fast-forwards; when local and remote history
+  have **diverged**, the configured strategy decides — `'local-wins'` (new
+  default: merges both sides via `merge -X ours`, conflicting keys resolve
+  in favor of local content, never produces conflict markers),
+  `'remote-wins'` (`reset --hard` to the remote state), or `'fail'` (throws
+  a typed `GitSyncError` with `code: 'GIT_DIVERGED'`, local state untouched).
+  A fresh storage without versioned data joining an established remote
+  adopts the remote history outright, regardless of strategy.
+- **`checkout()` accepts existing branches only:** the v2 "smart checkout"
+  of tags/commits (including the `targetBranch` parameter) is removed. A
+  branch rewind cannot survive remote synchronization — a rewound branch is
+  indistinguishable from an out-of-date node and gets synced right back.
+  Use the new `restore()` to re-establish a previous version and
+  `getItem(key, { version })` to inspect one.
+
+### Added
+
+- **`git.auth` option — simple token authentication:** `auth: { token,
+  username? }` authenticates HTTPS remotes (GitHub/GitLab PATs, deploy
+  tokens). The token is injected via the child-process environment only —
+  never written to `.git/config`, process arguments, or any file on disk.
+  Default username `oauth2`; SSH remotes keep using the ambient agent.
+  Requires git >= 2.31.
+- **`pull({ strategy })` & `git.strategy`:** per-call divergence strategy and
+  a configurable default (see Breaking Changes).
+- **`git.autoSync` option:** opt-in background synchronization running
+  commit -> pull -> push on an interval (default 30s, minimum 1s). Cycles
+  never overlap, skip while another process performs a mass mutation, never
+  keep the process alive (unref'd timer), stop on `dispose()`, and log
+  errors with repeat-throttling.
+- **`restore(tagOrCommit, [message])`:** one-call version rollback that
+  rolls the state _forward_ to the tagged content as a new commit — no
+  history rewrite, so it works identically for local storages and
+  auto-synced fleets. Uncommitted changes are snapshotted first; every
+  in-between version stays in the history and can itself be restored.
+- **`getItem(key, { version })`:** time-travel reads — retrieve a value as
+  it existed at any tag or commit without touching the current state.
+- **`createBranch(name, { at })`:** branch off a previous version (tag or
+  commit) — the sync-safe replacement for the removed
+  `checkout(tag, targetBranch)`; the current branch is never rewound.
+- **Auto-sync branch pinning:** auto-sync only runs on its sync branch (the
+  `branch` option, or the branch present on first cycle); cycles pause on
+  other branches and resume on switching back.
+- **`Storage.GitSyncError`:** typed error for remote sync failures with a
+  stable `code` (`'GIT_DIVERGED'`, `'GIT_NO_REMOTE'`).
+
+### Fixed
+
+- `push()` and `pull()` without a configured `origin` now fail with a clear
+  `GIT_NO_REMOTE` error instead of a cryptic git message.
+- A failed Git initialization (previously only logged) is now recorded and
+  re-thrown by remote operations, instead of causing confusing downstream
+  git errors while `open()` appeared successful.
+
 ## [2.0.0] - 15 Jul 2026
 
 ### Breaking Changes
